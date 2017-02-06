@@ -1,7 +1,5 @@
 """
-homeassistant.components.sensor.tellduslive
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Shows sensor values from Tellstick Net/Telstick Live.
+Support for Tellstick Net/Telstick Live.
 
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/sensor.tellduslive/
@@ -9,104 +7,107 @@ https://home-assistant.io/components/sensor.tellduslive/
 """
 import logging
 
-from datetime import datetime
-
-from homeassistant.const import TEMP_CELCIUS, ATTR_BATTERY_LEVEL
-from homeassistant.helpers.entity import Entity
-from homeassistant.components import tellduslive
-
-ATTR_LAST_UPDATED = "time_last_updated"
+from homeassistant.components.tellduslive import TelldusLiveEntity
+from homeassistant.const import TEMP_CELSIUS
 
 _LOGGER = logging.getLogger(__name__)
 
-SENSOR_TYPE_TEMP = "temp"
-SENSOR_TYPE_HUMIDITY = "humidity"
-SENSOR_TYPE_RAINRATE = "rrate"
-SENSOR_TYPE_RAINTOTAL = "rtot"
-SENSOR_TYPE_WINDDIRECTION = "wdir"
-SENSOR_TYPE_WINDAVERAGE = "wavg"
-SENSOR_TYPE_WINDGUST = "wgust"
-SENSOR_TYPE_WATT = "watt"
+SENSOR_TYPE_TEMP = 'temp'
+SENSOR_TYPE_HUMIDITY = 'humidity'
+SENSOR_TYPE_RAINRATE = 'rrate'
+SENSOR_TYPE_RAINTOTAL = 'rtot'
+SENSOR_TYPE_WINDDIRECTION = 'wdir'
+SENSOR_TYPE_WINDAVERAGE = 'wavg'
+SENSOR_TYPE_WINDGUST = 'wgust'
+SENSOR_TYPE_WATT = 'watt'
+SENSOR_TYPE_LUMINANCE = 'lum'
 
 SENSOR_TYPES = {
-    SENSOR_TYPE_TEMP: ['Temperature', TEMP_CELCIUS, "mdi:thermometer"],
-    SENSOR_TYPE_HUMIDITY: ['Humidity', '%', "mdi:water"],
-    SENSOR_TYPE_RAINRATE: ['Rain rate', 'mm', "mdi:water"],
-    SENSOR_TYPE_RAINTOTAL: ['Rain total', 'mm', "mdi:water"],
-    SENSOR_TYPE_WINDDIRECTION: ['Wind direction', '', ""],
-    SENSOR_TYPE_WINDAVERAGE: ['Wind average', 'm/s', ""],
-    SENSOR_TYPE_WINDGUST: ['Wind gust', 'm/s', ""],
-    SENSOR_TYPE_WATT: ['Watt', 'W', ""],
+    SENSOR_TYPE_TEMP: ['Temperature', TEMP_CELSIUS, 'mdi:thermometer'],
+    SENSOR_TYPE_HUMIDITY: ['Humidity', '%', 'mdi:water'],
+    SENSOR_TYPE_RAINRATE: ['Rain rate', 'mm', 'mdi:water'],
+    SENSOR_TYPE_RAINTOTAL: ['Rain total', 'mm', 'mdi:water'],
+    SENSOR_TYPE_WINDDIRECTION: ['Wind direction', '', ''],
+    SENSOR_TYPE_WINDAVERAGE: ['Wind average', 'm/s', ''],
+    SENSOR_TYPE_WINDGUST: ['Wind gust', 'm/s', ''],
+    SENSOR_TYPE_WATT: ['Watt', 'W', ''],
+    SENSOR_TYPE_LUMINANCE: ['Luminance', 'lx', ''],
 }
 
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """ Sets up Tellstick sensors. """
+    """Setup Tellstick sensors."""
     if discovery_info is None:
         return
-    sensors = tellduslive.NETWORK.get_sensors()
-    devices = []
-
-    for component in sensors:
-        for sensor in component["data"]:
-            # one component can have more than one sensor
-            # (e.g. both humidity and temperature)
-            devices.append(TelldusLiveSensor(component["id"],
-                                             component["name"],
-                                             sensor["name"]))
-    add_devices(devices)
+    add_devices(TelldusLiveSensor(hass, sensor) for sensor in discovery_info)
 
 
-class TelldusLiveSensor(Entity):
-    """ Represents a Telldus Live sensor. """
+class TelldusLiveSensor(TelldusLiveEntity):
+    """Representation of a Telldus Live sensor."""
 
-    def __init__(self, sensor_id, sensor_name, sensor_type):
-        self._sensor_id = sensor_id
-        self._sensor_type = sensor_type
-        self._state = None
-        self._name = sensor_name + ' ' + SENSOR_TYPES[sensor_type][0]
-        self._last_update = None
-        self._battery_level = None
-        self.update()
+    @property
+    def device_id(self):
+        """Return id of the device."""
+        return self._id[0]
+
+    @property
+    def _type(self):
+        """Return the type of the sensor."""
+        return self._id[1]
+
+    @property
+    def _value(self):
+        """Return value of the sensor."""
+        return self.device.value(*self._id[1:])
+
+    @property
+    def _value_as_temperature(self):
+        """Return the value as temperature."""
+        return round(float(self._value), 1)
+
+    @property
+    def _value_as_luminance(self):
+        """Return the value as luminance."""
+        return round(float(self._value), 1)
+
+    @property
+    def _value_as_humidity(self):
+        """Return the value as humidity."""
+        return int(round(float(self._value)))
 
     @property
     def name(self):
-        """ Returns the name of the device. """
-        return self._name
+        """Return the name of the sensor."""
+        return '{} {}'.format(
+            super().name,
+            self.quantity_name or '')
 
     @property
     def state(self):
-        """ Returns the state of the device. """
-        return self._state
+        """Return the state of the sensor."""
+        if self._type == SENSOR_TYPE_TEMP:
+            return self._value_as_temperature
+        elif self._type == SENSOR_TYPE_HUMIDITY:
+            return self._value_as_humidity
+        elif self._type == SENSOR_TYPE_LUMINANCE:
+            return self._value_as_luminance
+        else:
+            return self._value
 
     @property
-    def state_attributes(self):
-        attrs = dict()
-        if self._battery_level is not None:
-            attrs[ATTR_BATTERY_LEVEL] = self._battery_level
-        if self._last_update is not None:
-            attrs[ATTR_LAST_UPDATED] = self._last_update
-        return attrs
+    def quantity_name(self):
+        """Name of quantity."""
+        return SENSOR_TYPES[self._type][0] \
+            if self._type in SENSOR_TYPES else None
 
     @property
     def unit_of_measurement(self):
-        return SENSOR_TYPES[self._sensor_type][1]
+        """Return the unit of measurement."""
+        return SENSOR_TYPES[self._type][1] \
+            if self._type in SENSOR_TYPES else None
 
     @property
     def icon(self):
-        return SENSOR_TYPES[self._sensor_type][2]
-
-    def update(self):
-        values = tellduslive.NETWORK.get_sensor_value(self._sensor_id,
-                                                      self._sensor_type)
-        self._state, self._battery_level, self._last_update = values
-
-        self._state = float(self._state)
-        if self._sensor_type == SENSOR_TYPE_TEMP:
-            self._state = round(self._state, 1)
-        elif self._sensor_type == SENSOR_TYPE_HUMIDITY:
-            self._state = int(round(self._state))
-
-        self._battery_level = round(self._battery_level * 100 / 255)  # percent
-
-        self._last_update = str(datetime.fromtimestamp(self._last_update))
+        """Return the icon."""
+        return SENSOR_TYPES[self._type][2] \
+            if self._type in SENSOR_TYPES else None

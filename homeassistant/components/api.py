@@ -1,31 +1,31 @@
 """
-homeassistant.components.api
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Provides a Rest API for Home Assistant.
+Rest API for Home Assistant.
 
 For more details about the RESTful API, please refer to the documentation at
 https://home-assistant.io/developers/api/
 """
-import re
-import logging
-import threading
+import asyncio
 import json
+import logging
+
+from aiohttp import web
+import async_timeout
 
 import homeassistant.core as ha
-from homeassistant.exceptions import TemplateError
-from homeassistant.helpers.state import TrackStates
 import homeassistant.remote as rem
-from homeassistant.util import template
 from homeassistant.bootstrap import ERROR_LOG_FILENAME
 from homeassistant.const import (
-    URL_API, URL_API_STATES, URL_API_EVENTS, URL_API_SERVICES, URL_API_STREAM,
-    URL_API_EVENT_FORWARD, URL_API_STATES_ENTITY, URL_API_COMPONENTS,
-    URL_API_CONFIG, URL_API_BOOTSTRAP, URL_API_ERROR_LOG, URL_API_LOG_OUT,
-    URL_API_TEMPLATE, EVENT_TIME_CHANGED, EVENT_HOMEASSISTANT_STOP, MATCH_ALL,
-    HTTP_OK, HTTP_CREATED, HTTP_BAD_REQUEST, HTTP_NOT_FOUND,
-    HTTP_UNPROCESSABLE_ENTITY, HTTP_HEADER_CONTENT_TYPE,
-    CONTENT_TYPE_TEXT_PLAIN)
-
+    EVENT_HOMEASSISTANT_STOP, EVENT_TIME_CHANGED,
+    HTTP_BAD_REQUEST, HTTP_CREATED, HTTP_NOT_FOUND,
+    HTTP_UNPROCESSABLE_ENTITY, MATCH_ALL, URL_API, URL_API_COMPONENTS,
+    URL_API_CONFIG, URL_API_DISCOVERY_INFO, URL_API_ERROR_LOG,
+    URL_API_EVENT_FORWARD, URL_API_EVENTS, URL_API_SERVICES,
+    URL_API_STATES, URL_API_STATES_ENTITY, URL_API_STREAM, URL_API_TEMPLATE,
+    __version__)
+from homeassistant.exceptions import TemplateError
+from homeassistant.helpers.state import AsyncTrackStates
+from homeassistant.helpers import template
+from homeassistant.components.http import HomeAssistantView
 
 DOMAIN = 'api'
 DEPENDENCIES = ['http']
@@ -37,366 +37,408 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def setup(hass, config):
-    """ Register the API with the HTTP interface. """
-
-    # /api - for validation purposes
-    hass.http.register_path('GET', URL_API, _handle_get_api)
-
-    # /api/stream
-    hass.http.register_path('GET', URL_API_STREAM, _handle_get_api_stream)
-
-    # /api/config
-    hass.http.register_path('GET', URL_API_CONFIG, _handle_get_api_config)
-
-    # /api/bootstrap
-    hass.http.register_path(
-        'GET', URL_API_BOOTSTRAP, _handle_get_api_bootstrap)
-
-    # /states
-    hass.http.register_path('GET', URL_API_STATES, _handle_get_api_states)
-    hass.http.register_path(
-        'GET', re.compile(r'/api/states/(?P<entity_id>[a-zA-Z\._0-9]+)'),
-        _handle_get_api_states_entity)
-    hass.http.register_path(
-        'POST', re.compile(r'/api/states/(?P<entity_id>[a-zA-Z\._0-9]+)'),
-        _handle_post_state_entity)
-    hass.http.register_path(
-        'PUT', re.compile(r'/api/states/(?P<entity_id>[a-zA-Z\._0-9]+)'),
-        _handle_post_state_entity)
-
-    # /events
-    hass.http.register_path('GET', URL_API_EVENTS, _handle_get_api_events)
-    hass.http.register_path(
-        'POST', re.compile(r'/api/events/(?P<event_type>[a-zA-Z\._0-9]+)'),
-        _handle_api_post_events_event)
-
-    # /services
-    hass.http.register_path('GET', URL_API_SERVICES, _handle_get_api_services)
-    hass.http.register_path(
-        'POST',
-        re.compile((r'/api/services/'
-                    r'(?P<domain>[a-zA-Z\._0-9]+)/'
-                    r'(?P<service>[a-zA-Z\._0-9]+)')),
-        _handle_post_api_services_domain_service)
-
-    # /event_forwarding
-    hass.http.register_path(
-        'POST', URL_API_EVENT_FORWARD, _handle_post_api_event_forward)
-    hass.http.register_path(
-        'DELETE', URL_API_EVENT_FORWARD, _handle_delete_api_event_forward)
-
-    # /components
-    hass.http.register_path(
-        'GET', URL_API_COMPONENTS, _handle_get_api_components)
-
-    hass.http.register_path('GET', URL_API_ERROR_LOG,
-                            _handle_get_api_error_log)
-
-    hass.http.register_path('POST', URL_API_LOG_OUT, _handle_post_api_log_out)
-
-    hass.http.register_path('POST', URL_API_TEMPLATE,
-                            _handle_post_api_template)
+    """Register the API with the HTTP interface."""
+    hass.http.register_view(APIStatusView)
+    hass.http.register_view(APIEventStream)
+    hass.http.register_view(APIConfigView)
+    hass.http.register_view(APIDiscoveryView)
+    hass.http.register_view(APIStatesView)
+    hass.http.register_view(APIEntityStateView)
+    hass.http.register_view(APIEventListenersView)
+    hass.http.register_view(APIEventView)
+    hass.http.register_view(APIServicesView)
+    hass.http.register_view(APIDomainServicesView)
+    hass.http.register_view(APIEventForwardingView)
+    hass.http.register_view(APIComponentsView)
+    hass.http.register_view(APIErrorLogView)
+    hass.http.register_view(APITemplateView)
 
     return True
 
 
-def _handle_get_api(handler, path_match, data):
-    """ Renders the debug interface. """
-    handler.write_json_message("API running.")
+class APIStatusView(HomeAssistantView):
+    """View to handle Status requests."""
 
+    url = URL_API
+    name = "api:status"
 
-def _handle_get_api_stream(handler, path_match, data):
-    """ Provide a streaming interface for the event bus. """
-    gracefully_closed = False
-    hass = handler.server.hass
-    wfile = handler.wfile
-    write_lock = threading.Lock()
-    block = threading.Event()
-    session_id = None
+    @ha.callback
+    def get(self, request):
+        """Retrieve if API is running."""
+        return self.json_message('API running.')
 
-    restrict = data.get('restrict')
-    if restrict:
-        restrict = restrict.split(',')
 
-    def write_message(payload):
-        """ Writes a message to the output. """
-        with write_lock:
-            msg = "data: {}\n\n".format(payload)
-
-            try:
-                wfile.write(msg.encode("UTF-8"))
-                wfile.flush()
-            except (IOError, ValueError):
-                # IOError: socket errors
-                # ValueError: raised when 'I/O operation on closed file'
-                block.set()
+class APIEventStream(HomeAssistantView):
+    """View to handle EventStream requests."""
 
-    def forward_events(event):
-        """ Forwards events to the open request. """
-        nonlocal gracefully_closed
+    url = URL_API_STREAM
+    name = "api:stream"
 
-        if block.is_set() or event.event_type == EVENT_TIME_CHANGED:
-            return
-        elif event.event_type == EVENT_HOMEASSISTANT_STOP:
-            gracefully_closed = True
-            block.set()
-            return
+    @asyncio.coroutine
+    def get(self, request):
+        """Provide a streaming interface for the event bus."""
+        # pylint: disable=no-self-use
+        hass = request.app['hass']
+        stop_obj = object()
+        to_write = asyncio.Queue(loop=hass.loop)
 
-        handler.server.sessions.extend_validation(session_id)
-        write_message(json.dumps(event, cls=rem.JSONEncoder))
+        restrict = request.GET.get('restrict')
+        if restrict:
+            restrict = restrict.split(',') + [EVENT_HOMEASSISTANT_STOP]
 
-    handler.send_response(HTTP_OK)
-    handler.send_header('Content-type', 'text/event-stream')
-    session_id = handler.set_session_cookie_header()
-    handler.end_headers()
+        @asyncio.coroutine
+        def forward_events(event):
+            """Forward events to the open request."""
+            if event.event_type == EVENT_TIME_CHANGED:
+                return
 
-    if restrict:
-        for event in restrict:
-            hass.bus.listen(event, forward_events)
-    else:
-        hass.bus.listen(MATCH_ALL, forward_events)
+            if restrict and event.event_type not in restrict:
+                return
 
-    while True:
-        write_message(STREAM_PING_PAYLOAD)
+            _LOGGER.debug('STREAM %s FORWARDING %s', id(stop_obj), event)
 
-        block.wait(STREAM_PING_INTERVAL)
+            if event.event_type == EVENT_HOMEASSISTANT_STOP:
+                data = stop_obj
+            else:
+                data = json.dumps(event, cls=rem.JSONEncoder)
 
-        if block.is_set():
-            break
+            yield from to_write.put(data)
 
-    if not gracefully_closed:
-        _LOGGER.info("Found broken event stream to %s, cleaning up",
-                     handler.client_address[0])
+        response = web.StreamResponse()
+        response.content_type = 'text/event-stream'
+        yield from response.prepare(request)
 
-    if restrict:
-        for event in restrict:
-            hass.bus.remove_listener(event, forward_events)
-    else:
-        hass.bus.remove_listener(MATCH_ALL, forward_events)
+        unsub_stream = hass.bus.async_listen(MATCH_ALL, forward_events)
+
+        try:
+            _LOGGER.debug('STREAM %s ATTACHED', id(stop_obj))
 
+            # Fire off one message so browsers fire open event right away
+            yield from to_write.put(STREAM_PING_PAYLOAD)
 
-def _handle_get_api_config(handler, path_match, data):
-    """ Returns the Home Assistant config. """
-    handler.write_json(handler.server.hass.config.as_dict())
+            while True:
+                try:
+                    with async_timeout.timeout(STREAM_PING_INTERVAL,
+                                               loop=hass.loop):
+                        payload = yield from to_write.get()
 
+                    if payload is stop_obj:
+                        break
 
-def _handle_get_api_bootstrap(handler, path_match, data):
-    """ Returns all data needed to bootstrap Home Assistant. """
-    hass = handler.server.hass
+                    msg = "data: {}\n\n".format(payload)
+                    _LOGGER.debug('STREAM %s WRITING %s', id(stop_obj),
+                                  msg.strip())
+                    response.write(msg.encode("UTF-8"))
+                    yield from response.drain()
+                except asyncio.TimeoutError:
+                    yield from to_write.put(STREAM_PING_PAYLOAD)
 
-    handler.write_json({
-        'config': hass.config.as_dict(),
-        'states': hass.states.all(),
-        'events': _events_json(hass),
-        'services': _services_json(hass),
-    })
+        except asyncio.CancelledError:
+            _LOGGER.debug('STREAM %s ABORT', id(stop_obj))
 
+        finally:
+            _LOGGER.debug('STREAM %s RESPONSE CLOSED', id(stop_obj))
+            unsub_stream()
 
-def _handle_get_api_states(handler, path_match, data):
-    """ Returns a dict containing all entity ids and their state. """
-    handler.write_json(handler.server.hass.states.all())
 
+class APIConfigView(HomeAssistantView):
+    """View to handle Config requests."""
 
-def _handle_get_api_states_entity(handler, path_match, data):
-    """ Returns the state of a specific entity. """
-    entity_id = path_match.group('entity_id')
+    url = URL_API_CONFIG
+    name = "api:config"
 
-    state = handler.server.hass.states.get(entity_id)
+    @ha.callback
+    def get(self, request):
+        """Get current configuration."""
+        return self.json(request.app['hass'].config.as_dict())
 
-    if state:
-        handler.write_json(state)
-    else:
-        handler.write_json_message("State does not exist.", HTTP_NOT_FOUND)
 
+class APIDiscoveryView(HomeAssistantView):
+    """View to provide discovery info."""
 
-def _handle_post_state_entity(handler, path_match, data):
-    """ Handles updating the state of an entity.
+    requires_auth = False
+    url = URL_API_DISCOVERY_INFO
+    name = "api:discovery"
 
-    This handles the following paths:
-    /api/states/<entity_id>
-    """
-    entity_id = path_match.group('entity_id')
+    @ha.callback
+    def get(self, request):
+        """Get discovery info."""
+        hass = request.app['hass']
+        needs_auth = hass.config.api.api_password is not None
+        return self.json({
+            'base_url': hass.config.api.base_url,
+            'location_name': hass.config.location_name,
+            'requires_api_password': needs_auth,
+            'version': __version__
+        })
 
-    try:
-        new_state = data['state']
-    except KeyError:
-        handler.write_json_message("state not specified", HTTP_BAD_REQUEST)
-        return
 
-    attributes = data['attributes'] if 'attributes' in data else None
+class APIStatesView(HomeAssistantView):
+    """View to handle States requests."""
 
-    is_new_state = handler.server.hass.states.get(entity_id) is None
+    url = URL_API_STATES
+    name = "api:states"
 
-    # Write state
-    handler.server.hass.states.set(entity_id, new_state, attributes)
+    @ha.callback
+    def get(self, request):
+        """Get current states."""
+        return self.json(request.app['hass'].states.async_all())
 
-    state = handler.server.hass.states.get(entity_id)
 
-    status_code = HTTP_CREATED if is_new_state else HTTP_OK
+class APIEntityStateView(HomeAssistantView):
+    """View to handle EntityState requests."""
 
-    handler.write_json(
-        state.as_dict(),
-        status_code=status_code,
-        location=URL_API_STATES_ENTITY.format(entity_id))
+    url = "/api/states/{entity_id}"
+    name = "api:entity-state"
 
+    @ha.callback
+    def get(self, request, entity_id):
+        """Retrieve state of entity."""
+        state = request.app['hass'].states.get(entity_id)
+        if state:
+            return self.json(state)
+        else:
+            return self.json_message('Entity not found', HTTP_NOT_FOUND)
 
-def _handle_get_api_events(handler, path_match, data):
-    """ Handles getting overview of event listeners. """
-    handler.write_json(_events_json(handler.server.hass))
+    @asyncio.coroutine
+    def post(self, request, entity_id):
+        """Update state of entity."""
+        hass = request.app['hass']
+        try:
+            data = yield from request.json()
+        except ValueError:
+            return self.json_message('Invalid JSON specified',
+                                     HTTP_BAD_REQUEST)
 
+        new_state = data.get('state')
 
-def _handle_api_post_events_event(handler, path_match, event_data):
-    """ Handles firing of an event.
+        if not new_state:
+            return self.json_message('No state specified', HTTP_BAD_REQUEST)
 
-    This handles the following paths:
-    /api/events/<event_type>
+        attributes = data.get('attributes')
+        force_update = data.get('force_update', False)
 
-    Events from /api are threated as remote events.
-    """
-    event_type = path_match.group('event_type')
+        is_new_state = hass.states.get(entity_id) is None
 
-    if event_data is not None and not isinstance(event_data, dict):
-        handler.write_json_message(
-            "event_data should be an object", HTTP_UNPROCESSABLE_ENTITY)
+        # Write state
+        hass.states.async_set(entity_id, new_state, attributes, force_update)
 
-    event_origin = ha.EventOrigin.remote
+        # Read the state back for our response
+        status_code = HTTP_CREATED if is_new_state else 200
+        resp = self.json(hass.states.get(entity_id), status_code)
 
-    # Special case handling for event STATE_CHANGED
-    # We will try to convert state dicts back to State objects
-    if event_type == ha.EVENT_STATE_CHANGED and event_data:
-        for key in ('old_state', 'new_state'):
-            state = ha.State.from_dict(event_data.get(key))
+        resp.headers.add('Location', URL_API_STATES_ENTITY.format(entity_id))
 
-            if state:
-                event_data[key] = state
+        return resp
 
-    handler.server.hass.bus.fire(event_type, event_data, event_origin)
+    @ha.callback
+    def delete(self, request, entity_id):
+        """Remove entity."""
+        if request.app['hass'].states.async_remove(entity_id):
+            return self.json_message('Entity removed')
+        else:
+            return self.json_message('Entity not found', HTTP_NOT_FOUND)
 
-    handler.write_json_message("Event {} fired.".format(event_type))
 
+class APIEventListenersView(HomeAssistantView):
+    """View to handle EventListeners requests."""
 
-def _handle_get_api_services(handler, path_match, data):
-    """ Handles getting overview of services. """
-    handler.write_json(_services_json(handler.server.hass))
+    url = URL_API_EVENTS
+    name = "api:event-listeners"
 
+    @ha.callback
+    def get(self, request):
+        """Get event listeners."""
+        return self.json(async_events_json(request.app['hass']))
 
-# pylint: disable=invalid-name
-def _handle_post_api_services_domain_service(handler, path_match, data):
-    """ Handles calling a service.
 
-    This handles the following paths:
-    /api/services/<domain>/<service>
-    """
-    domain = path_match.group('domain')
-    service = path_match.group('service')
+class APIEventView(HomeAssistantView):
+    """View to handle Event requests."""
 
-    with TrackStates(handler.server.hass) as changed_states:
-        handler.server.hass.services.call(domain, service, data, True)
+    url = '/api/events/{event_type}'
+    name = "api:event"
 
-    handler.write_json(changed_states)
+    @asyncio.coroutine
+    def post(self, request, event_type):
+        """Fire events."""
+        body = yield from request.text()
+        event_data = json.loads(body) if body else None
 
+        if event_data is not None and not isinstance(event_data, dict):
+            return self.json_message('Event data should be a JSON object',
+                                     HTTP_BAD_REQUEST)
 
-# pylint: disable=invalid-name
-def _handle_post_api_event_forward(handler, path_match, data):
-    """ Handles adding an event forwarding target. """
+        # Special case handling for event STATE_CHANGED
+        # We will try to convert state dicts back to State objects
+        if event_type == ha.EVENT_STATE_CHANGED and event_data:
+            for key in ('old_state', 'new_state'):
+                state = ha.State.from_dict(event_data.get(key))
 
-    try:
-        host = data['host']
-        api_password = data['api_password']
-    except KeyError:
-        handler.write_json_message(
-            "No host or api_password received.", HTTP_BAD_REQUEST)
-        return
+                if state:
+                    event_data[key] = state
 
-    try:
-        port = int(data['port']) if 'port' in data else None
-    except ValueError:
-        handler.write_json_message(
-            "Invalid value received for port", HTTP_UNPROCESSABLE_ENTITY)
-        return
+        request.app['hass'].bus.async_fire(event_type, event_data,
+                                           ha.EventOrigin.remote)
 
-    api = rem.API(host, api_password, port)
+        return self.json_message("Event {} fired.".format(event_type))
 
-    if not api.validate_api():
-        handler.write_json_message(
-            "Unable to validate API", HTTP_UNPROCESSABLE_ENTITY)
-        return
 
-    if handler.server.event_forwarder is None:
-        handler.server.event_forwarder = \
-            rem.EventForwarder(handler.server.hass)
+class APIServicesView(HomeAssistantView):
+    """View to handle Services requests."""
 
-    handler.server.event_forwarder.connect(api)
+    url = URL_API_SERVICES
+    name = "api:services"
 
-    handler.write_json_message("Event forwarding setup.")
+    @ha.callback
+    def get(self, request):
+        """Get registered services."""
+        return self.json(async_services_json(request.app['hass']))
 
 
-def _handle_delete_api_event_forward(handler, path_match, data):
-    """ Handles deleting an event forwarding target. """
+class APIDomainServicesView(HomeAssistantView):
+    """View to handle DomainServices requests."""
 
-    try:
-        host = data['host']
-    except KeyError:
-        handler.write_json_message("No host received.", HTTP_BAD_REQUEST)
-        return
+    url = "/api/services/{domain}/{service}"
+    name = "api:domain-services"
 
-    try:
-        port = int(data['port']) if 'port' in data else None
-    except ValueError:
-        handler.write_json_message(
-            "Invalid value received for port", HTTP_UNPROCESSABLE_ENTITY)
-        return
+    @asyncio.coroutine
+    def post(self, request, domain, service):
+        """Call a service.
 
-    if handler.server.event_forwarder is not None:
-        api = rem.API(host, None, port)
+        Returns a list of changed states.
+        """
+        hass = request.app['hass']
+        body = yield from request.text()
+        data = json.loads(body) if body else None
 
-        handler.server.event_forwarder.disconnect(api)
+        with AsyncTrackStates(hass) as changed_states:
+            yield from hass.services.async_call(domain, service, data, True)
 
-    handler.write_json_message("Event forwarding cancelled.")
+        return self.json(changed_states)
 
 
-def _handle_get_api_components(handler, path_match, data):
-    """ Returns all the loaded components. """
+class APIEventForwardingView(HomeAssistantView):
+    """View to handle EventForwarding requests."""
 
-    handler.write_json(handler.server.hass.config.components)
+    url = URL_API_EVENT_FORWARD
+    name = "api:event-forward"
+    event_forwarder = None
 
+    @asyncio.coroutine
+    def post(self, request):
+        """Setup an event forwarder."""
+        hass = request.app['hass']
+        try:
+            data = yield from request.json()
+        except ValueError:
+            return self.json_message("No data received.", HTTP_BAD_REQUEST)
 
-def _handle_get_api_error_log(handler, path_match, data):
-    """ Returns the logged errors for this session. """
-    handler.write_file(handler.server.hass.config.path(ERROR_LOG_FILENAME),
-                       False)
+        try:
+            host = data['host']
+            api_password = data['api_password']
+        except KeyError:
+            return self.json_message("No host or api_password received.",
+                                     HTTP_BAD_REQUEST)
 
+        try:
+            port = int(data['port']) if 'port' in data else None
+        except ValueError:
+            return self.json_message("Invalid value received for port.",
+                                     HTTP_UNPROCESSABLE_ENTITY)
 
-def _handle_post_api_log_out(handler, path_match, data):
-    """ Log user out. """
-    handler.send_response(HTTP_OK)
-    handler.destroy_session()
-    handler.end_headers()
+        api = rem.API(host, api_password, port)
 
+        valid = yield from hass.loop.run_in_executor(
+            None, api.validate_api)
+        if not valid:
+            return self.json_message("Unable to validate API.",
+                                     HTTP_UNPROCESSABLE_ENTITY)
 
-def _handle_post_api_template(handler, path_match, data):
-    """ Log user out. """
-    template_string = data.get('template', '')
+        if self.event_forwarder is None:
+            self.event_forwarder = rem.EventForwarder(hass)
 
-    try:
-        rendered = template.render(handler.server.hass, template_string)
+        self.event_forwarder.async_connect(api)
 
-        handler.send_response(HTTP_OK)
-        handler.send_header(HTTP_HEADER_CONTENT_TYPE, CONTENT_TYPE_TEXT_PLAIN)
-        handler.end_headers()
-        handler.wfile.write(rendered.encode('utf-8'))
-    except TemplateError as e:
-        handler.write_json_message(str(e), HTTP_UNPROCESSABLE_ENTITY)
-        return
+        return self.json_message("Event forwarding setup.")
 
+    @asyncio.coroutine
+    def delete(self, request):
+        """Remove event forwarder."""
+        try:
+            data = yield from request.json()
+        except ValueError:
+            return self.json_message("No data received.", HTTP_BAD_REQUEST)
 
-def _services_json(hass):
-    """ Generate services data to JSONify. """
+        try:
+            host = data['host']
+        except KeyError:
+            return self.json_message("No host received.", HTTP_BAD_REQUEST)
+
+        try:
+            port = int(data['port']) if 'port' in data else None
+        except ValueError:
+            return self.json_message("Invalid value received for port.",
+                                     HTTP_UNPROCESSABLE_ENTITY)
+
+        if self.event_forwarder is not None:
+            api = rem.API(host, None, port)
+
+            self.event_forwarder.async_disconnect(api)
+
+        return self.json_message("Event forwarding cancelled.")
+
+
+class APIComponentsView(HomeAssistantView):
+    """View to handle Components requests."""
+
+    url = URL_API_COMPONENTS
+    name = "api:components"
+
+    @ha.callback
+    def get(self, request):
+        """Get current loaded components."""
+        return self.json(request.app['hass'].config.components)
+
+
+class APIErrorLogView(HomeAssistantView):
+    """View to handle ErrorLog requests."""
+
+    url = URL_API_ERROR_LOG
+    name = "api:error-log"
+
+    @asyncio.coroutine
+    def get(self, request):
+        """Serve error log."""
+        resp = yield from self.file(
+            request, request.app['hass'].config.path(ERROR_LOG_FILENAME))
+        return resp
+
+
+class APITemplateView(HomeAssistantView):
+    """View to handle requests."""
+
+    url = URL_API_TEMPLATE
+    name = "api:template"
+
+    @asyncio.coroutine
+    def post(self, request):
+        """Render a template."""
+        try:
+            data = yield from request.json()
+            tpl = template.Template(data['template'], request.app['hass'])
+            return tpl.async_render(data.get('variables'))
+        except (ValueError, TemplateError) as ex:
+            return self.json_message('Error rendering template: {}'.format(ex),
+                                     HTTP_BAD_REQUEST)
+
+
+def async_services_json(hass):
+    """Generate services data to JSONify."""
     return [{"domain": key, "services": value}
-            for key, value in hass.services.services.items()]
+            for key, value in hass.services.async_services().items()]
 
 
-def _events_json(hass):
-    """ Generate event data to JSONify. """
+def async_events_json(hass):
+    """Generate event data to JSONify."""
     return [{"event": key, "listener_count": value}
-            for key, value in hass.bus.listeners.items()]
+            for key, value in hass.bus.async_listeners().items()]

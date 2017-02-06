@@ -1,191 +1,147 @@
 """
-homeassistant.components.sensor.mysensors
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Support for MySensors sensors.
 
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/sensor.mysensors/
 """
 import logging
-from collections import defaultdict
 
+from homeassistant.components import mysensors
+from homeassistant.const import TEMP_CELSIUS, TEMP_FAHRENHEIT
 from homeassistant.helpers.entity import Entity
 
-from homeassistant.const import (
-    ATTR_BATTERY_LEVEL,
-    TEMP_CELCIUS, TEMP_FAHRENHEIT,
-    STATE_ON, STATE_OFF)
-
-import homeassistant.components.mysensors as mysensors
-
 _LOGGER = logging.getLogger(__name__)
-DEPENDENCIES = []
 
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """Setup the mysensors platform for sensors."""
+    """Setup the MySensors platform for sensors."""
     # Only act if loaded via mysensors by discovery event.
     # Otherwise gateway is not setup.
     if discovery_info is None:
         return
 
-    for gateway in mysensors.GATEWAYS.values():
+    gateways = hass.data.get(mysensors.MYSENSORS_GATEWAYS)
+    if not gateways:
+        return
+
+    for gateway in gateways:
         # Define the S_TYPES and V_TYPES that the platform should handle as
-        # states.
-        s_types = [
-            gateway.const.Presentation.S_DOOR,
-            gateway.const.Presentation.S_MOTION,
-            gateway.const.Presentation.S_SMOKE,
-            gateway.const.Presentation.S_TEMP,
-            gateway.const.Presentation.S_HUM,
-            gateway.const.Presentation.S_BARO,
-            gateway.const.Presentation.S_WIND,
-            gateway.const.Presentation.S_RAIN,
-            gateway.const.Presentation.S_UV,
-            gateway.const.Presentation.S_WEIGHT,
-            gateway.const.Presentation.S_POWER,
-            gateway.const.Presentation.S_DISTANCE,
-            gateway.const.Presentation.S_LIGHT_LEVEL,
-            gateway.const.Presentation.S_IR,
-            gateway.const.Presentation.S_WATER,
-            gateway.const.Presentation.S_AIR_QUALITY,
-            gateway.const.Presentation.S_CUSTOM,
-            gateway.const.Presentation.S_DUST,
-            gateway.const.Presentation.S_SCENE_CONTROLLER,
-        ]
-        not_v_types = [
-            gateway.const.SetReq.V_ARMED,
-            gateway.const.SetReq.V_LIGHT,
-            gateway.const.SetReq.V_LOCK_STATUS,
-        ]
-        if float(gateway.version) >= 1.5:
-            s_types.extend([
-                gateway.const.Presentation.S_COLOR_SENSOR,
-                gateway.const.Presentation.S_MULTIMETER,
-                gateway.const.Presentation.S_SPRINKLER,
-                gateway.const.Presentation.S_WATER_LEAK,
-                gateway.const.Presentation.S_SOUND,
-                gateway.const.Presentation.S_VIBRATION,
-                gateway.const.Presentation.S_MOISTURE,
-            ])
-            not_v_types.extend([gateway.const.SetReq.V_STATUS, ])
-        v_types = [member for member in gateway.const.SetReq
-                   if member.value not in not_v_types]
+        # states. Map them in a dict of lists.
+        pres = gateway.const.Presentation
+        set_req = gateway.const.SetReq
+        map_sv_types = {
+            pres.S_TEMP: [set_req.V_TEMP],
+            pres.S_HUM: [set_req.V_HUM],
+            pres.S_BARO: [set_req.V_PRESSURE, set_req.V_FORECAST],
+            pres.S_WIND: [set_req.V_WIND, set_req.V_GUST, set_req.V_DIRECTION],
+            pres.S_RAIN: [set_req.V_RAIN, set_req.V_RAINRATE],
+            pres.S_UV: [set_req.V_UV],
+            pres.S_WEIGHT: [set_req.V_WEIGHT, set_req.V_IMPEDANCE],
+            pres.S_POWER: [set_req.V_WATT, set_req.V_KWH],
+            pres.S_DISTANCE: [set_req.V_DISTANCE],
+            pres.S_LIGHT_LEVEL: [set_req.V_LIGHT_LEVEL],
+            pres.S_IR: [set_req.V_IR_RECEIVE],
+            pres.S_WATER: [set_req.V_FLOW, set_req.V_VOLUME],
+            pres.S_CUSTOM: [set_req.V_VAR1,
+                            set_req.V_VAR2,
+                            set_req.V_VAR3,
+                            set_req.V_VAR4,
+                            set_req.V_VAR5],
+            pres.S_SCENE_CONTROLLER: [set_req.V_SCENE_ON,
+                                      set_req.V_SCENE_OFF],
+        }
+        if float(gateway.protocol_version) < 1.5:
+            map_sv_types.update({
+                pres.S_AIR_QUALITY: [set_req.V_DUST_LEVEL],
+                pres.S_DUST: [set_req.V_DUST_LEVEL],
+            })
+        if float(gateway.protocol_version) >= 1.5:
+            map_sv_types.update({
+                pres.S_COLOR_SENSOR: [set_req.V_RGB],
+                pres.S_MULTIMETER: [set_req.V_VOLTAGE,
+                                    set_req.V_CURRENT,
+                                    set_req.V_IMPEDANCE],
+                pres.S_SOUND: [set_req.V_LEVEL],
+                pres.S_VIBRATION: [set_req.V_LEVEL],
+                pres.S_MOISTURE: [set_req.V_LEVEL],
+                pres.S_AIR_QUALITY: [set_req.V_LEVEL],
+                pres.S_DUST: [set_req.V_LEVEL],
+            })
+            map_sv_types[pres.S_LIGHT_LEVEL].append(set_req.V_LEVEL)
 
-        devices = defaultdict(list)
+        if float(gateway.protocol_version) >= 2.0:
+            map_sv_types.update({
+                pres.S_INFO: [set_req.V_TEXT],
+                pres.S_GAS: [set_req.V_FLOW, set_req.V_VOLUME],
+                pres.S_GPS: [set_req.V_POSITION],
+                pres.S_WATER_QUALITY: [set_req.V_TEMP, set_req.V_PH,
+                                       set_req.V_ORP, set_req.V_EC]
+            })
+            map_sv_types[pres.S_CUSTOM].append(set_req.V_CUSTOM)
+            map_sv_types[pres.S_POWER].extend(
+                [set_req.V_VAR, set_req.V_VA, set_req.V_POWER_FACTOR])
+
+        devices = {}
         gateway.platform_callbacks.append(mysensors.pf_callback_factory(
-            s_types, v_types, devices, add_devices, MySensorsSensor))
+            map_sv_types, devices, MySensorsSensor, add_devices))
 
 
-class MySensorsSensor(Entity):
-    """Represent the value of a MySensors child node."""
+class MySensorsSensor(mysensors.MySensorsDeviceEntity, Entity):
+    """Representation of a MySensors Sensor child node."""
 
-    # pylint: disable=too-many-arguments
+    @property
+    def force_update(self):
+        """Return True if state updates should be forced.
 
-    def __init__(self, gateway, node_id, child_id, name, value_type):
-        """Setup class attributes on instantiation.
-
-        Args:
-        gateway (GatewayWrapper): Gateway object.
-        node_id (str): Id of node.
-        child_id (str): Id of child.
-        name (str): Entity name.
-        value_type (str): Value type of child. Value is entity state.
-
-        Attributes:
-        gateway (GatewayWrapper): Gateway object.
-        node_id (str): Id of node.
-        child_id (str): Id of child.
-        _name (str): Entity name.
-        value_type (str): Value type of child. Value is entity state.
-        battery_level (int): Node battery level.
-        _values (dict): Child values. Non state values set as state attributes.
+        If True, a state change will be triggered anytime the state property is
+        updated, not just when the value changes.
         """
-        self.gateway = gateway
-        self.node_id = node_id
-        self.child_id = child_id
-        self._name = name
-        self.value_type = value_type
-        self.battery_level = 0
-        self._values = {}
-
-    @property
-    def should_poll(self):
-        """MySensor gateway pushes its state to HA."""
-        return False
-
-    @property
-    def name(self):
-        """The name of this entity."""
-        return self._name
+        return True
 
     @property
     def state(self):
         """Return the state of the device."""
-        if not self._values:
-            return ''
-        return self._values[self.value_type]
+        return self._values.get(self.value_type)
 
     @property
     def unit_of_measurement(self):
-        """Unit of measurement of this entity."""
-        # pylint:disable=too-many-return-statements
-        if self.value_type == self.gateway.const.SetReq.V_TEMP:
-            return TEMP_CELCIUS if self.gateway.metric else TEMP_FAHRENHEIT
-        elif self.value_type == self.gateway.const.SetReq.V_HUM or \
-                self.value_type == self.gateway.const.SetReq.V_DIMMER or \
-                self.value_type == self.gateway.const.SetReq.V_PERCENTAGE or \
-                self.value_type == self.gateway.const.SetReq.V_LIGHT_LEVEL:
-            return '%'
-        elif self.value_type == self.gateway.const.SetReq.V_WATT:
-            return 'W'
-        elif self.value_type == self.gateway.const.SetReq.V_KWH:
-            return 'kWh'
-        elif self.value_type == self.gateway.const.SetReq.V_VOLTAGE:
-            return 'V'
-        elif self.value_type == self.gateway.const.SetReq.V_CURRENT:
-            return 'A'
-        elif self.value_type == self.gateway.const.SetReq.V_IMPEDANCE:
-            return 'ohm'
-        elif self.gateway.const.SetReq.V_UNIT_PREFIX in self._values:
-            return self._values[self.gateway.const.SetReq.V_UNIT_PREFIX]
-        return None
-
-    @property
-    def device_state_attributes(self):
-        """Return device specific state attributes."""
-        device_attr = dict(self._values)
-        device_attr.pop(self.value_type, None)
-        return device_attr
-
-    @property
-    def state_attributes(self):
-        """Return the state attributes."""
-        data = {
-            mysensors.ATTR_PORT: self.gateway.port,
-            mysensors.ATTR_NODE_ID: self.node_id,
-            mysensors.ATTR_CHILD_ID: self.child_id,
-            ATTR_BATTERY_LEVEL: self.battery_level,
+        """Return the unit of measurement of this entity."""
+        pres = self.gateway.const.Presentation
+        set_req = self.gateway.const.SetReq
+        unit_map = {
+            set_req.V_TEMP: (TEMP_CELSIUS
+                             if self.gateway.metric else TEMP_FAHRENHEIT),
+            set_req.V_HUM: '%',
+            set_req.V_DIMMER: '%',
+            set_req.V_LIGHT_LEVEL: '%',
+            set_req.V_DIRECTION: '°',
+            set_req.V_WEIGHT: 'kg',
+            set_req.V_DISTANCE: 'm',
+            set_req.V_IMPEDANCE: 'ohm',
+            set_req.V_WATT: 'W',
+            set_req.V_KWH: 'kWh',
+            set_req.V_FLOW: 'm',
+            set_req.V_VOLUME: 'm³',
+            set_req.V_VOLTAGE: 'V',
+            set_req.V_CURRENT: 'A',
         }
-
-        device_attr = self.device_state_attributes
-
-        if device_attr is not None:
-            data.update(device_attr)
-
-        return data
-
-    def update(self):
-        """Update the controller with the latest values from a sensor."""
-        node = self.gateway.sensors[self.node_id]
-        child = node.children[self.child_id]
-        for value_type, value in child.values.items():
-            _LOGGER.info(
-                "%s: value_type %s, value = %s", self._name, value_type, value)
-            if value_type == self.gateway.const.SetReq.V_TRIPPED:
-                self._values[value_type] = STATE_ON if int(
-                    value) == 1 else STATE_OFF
-            else:
-                self._values[value_type] = value
-
-        self.battery_level = node.battery_level
+        if float(self.gateway.protocol_version) >= 1.5:
+            if set_req.V_UNIT_PREFIX in self._values:
+                return self._values[
+                    set_req.V_UNIT_PREFIX]
+            unit_map.update({
+                set_req.V_PERCENTAGE: '%',
+                set_req.V_LEVEL: {
+                    pres.S_SOUND: 'dB', pres.S_VIBRATION: 'Hz',
+                    pres.S_LIGHT_LEVEL: 'lux'}})
+        if float(self.gateway.protocol_version) >= 2.0:
+            unit_map.update({
+                set_req.V_ORP: 'mV',
+                set_req.V_EC: 'μS/cm',
+                set_req.V_VAR: 'var',
+                set_req.V_VA: 'VA',
+            })
+        unit = unit_map.get(self.value_type)
+        if isinstance(unit, dict):
+            unit = unit.get(self.child_type)
+        return unit

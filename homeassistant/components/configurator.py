@@ -1,8 +1,5 @@
 """
-homeassistant.components.configurator
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-A component to allow pieces of code to request configuration from the user.
+Support to allow pieces of code to request configuration from the user.
 
 Initiate a request by calling the `request_config` method with a callback.
 This will return a request id that has to be used for future calls.
@@ -11,41 +8,46 @@ the user has submitted configuration information.
 """
 import logging
 
-from homeassistant.helpers import generate_entity_id
-from homeassistant.const import EVENT_TIME_CHANGED
+from homeassistant.const import EVENT_TIME_CHANGED, ATTR_FRIENDLY_NAME, \
+    ATTR_ENTITY_PICTURE
+from homeassistant.helpers.entity import generate_entity_id
 
-DOMAIN = "configurator"
-ENTITY_ID_FORMAT = DOMAIN + ".{}"
-
-SERVICE_CONFIGURE = "configure"
-
-STATE_CONFIGURE = "configure"
-STATE_CONFIGURED = "configured"
-
-ATTR_CONFIGURE_ID = "configure_id"
-ATTR_DESCRIPTION = "description"
-ATTR_DESCRIPTION_IMAGE = "description_image"
-ATTR_SUBMIT_CAPTION = "submit_caption"
-ATTR_FIELDS = "fields"
-ATTR_ERRORS = "errors"
-
-_REQUESTS = {}
 _INSTANCES = {}
 _LOGGER = logging.getLogger(__name__)
+_REQUESTS = {}
+
+ATTR_CONFIGURE_ID = 'configure_id'
+ATTR_DESCRIPTION = 'description'
+ATTR_DESCRIPTION_IMAGE = 'description_image'
+ATTR_ERRORS = 'errors'
+ATTR_FIELDS = 'fields'
+ATTR_LINK_NAME = 'link_name'
+ATTR_LINK_URL = 'link_url'
+ATTR_SUBMIT_CAPTION = 'submit_caption'
+
+DOMAIN = 'configurator'
+
+ENTITY_ID_FORMAT = DOMAIN + '.{}'
+
+SERVICE_CONFIGURE = 'configure'
+STATE_CONFIGURE = 'configure'
+STATE_CONFIGURED = 'configured'
 
 
-# pylint: disable=too-many-arguments
 def request_config(
         hass, name, callback, description=None, description_image=None,
-        submit_caption=None, fields=None):
-    """ Create a new request for config.
-    Will return an ID to be used for sequent calls. """
+        submit_caption=None, fields=None, link_name=None, link_url=None,
+        entity_picture=None):
+    """Create a new request for configuration.
 
+    Will return an ID to be used for sequent calls.
+    """
     instance = _get_instance(hass)
 
     request_id = instance.request_config(
         name, callback,
-        description, description_image, submit_caption, fields)
+        description, description_image, submit_caption,
+        fields, link_name, link_url, entity_picture)
 
     _REQUESTS[request_id] = instance
 
@@ -53,7 +55,7 @@ def request_config(
 
 
 def notify_errors(request_id, error):
-    """ Add errors to a config request. """
+    """Add errors to a config request."""
     try:
         _REQUESTS[request_id].notify_errors(request_id, error)
     except KeyError:
@@ -62,7 +64,7 @@ def notify_errors(request_id, error):
 
 
 def request_done(request_id):
-    """ Mark a config request as done. """
+    """Mark a configuration request as done."""
     try:
         _REQUESTS.pop(request_id).request_done(request_id)
     except KeyError:
@@ -71,12 +73,12 @@ def request_done(request_id):
 
 
 def setup(hass, config):
-    """ Set up Configurator. """
+    """Setup the configurator component."""
     return True
 
 
 def _get_instance(hass):
-    """ Get an instance per hass object. """
+    """Get an instance per hass object."""
     try:
         return _INSTANCES[hass]
     except KeyError:
@@ -89,23 +91,21 @@ def _get_instance(hass):
 
 
 class Configurator(object):
-    """
-    Class to keep track of current configuration requests.
-    """
+    """The class to keep track of current configuration requests."""
 
     def __init__(self, hass):
+        """Initialize the configurator."""
         self.hass = hass
         self._cur_id = 0
         self._requests = {}
         hass.services.register(
             DOMAIN, SERVICE_CONFIGURE, self.handle_service_call)
 
-    # pylint: disable=too-many-arguments
     def request_config(
             self, name, callback,
-            description, description_image, submit_caption, fields):
-        """ Setup a request for configuration. """
-
+            description, description_image, submit_caption,
+            fields, link_name, link_url, entity_picture):
+        """Setup a request for configuration."""
         entity_id = generate_entity_id(ENTITY_ID_FORMAT, name, hass=self.hass)
 
         if fields is None:
@@ -118,6 +118,8 @@ class Configurator(object):
         data = {
             ATTR_CONFIGURE_ID: request_id,
             ATTR_FIELDS: fields,
+            ATTR_FRIENDLY_NAME: name,
+            ATTR_ENTITY_PICTURE: entity_picture,
         }
 
         data.update({
@@ -125,6 +127,8 @@ class Configurator(object):
                 (ATTR_DESCRIPTION, description),
                 (ATTR_DESCRIPTION_IMAGE, description_image),
                 (ATTR_SUBMIT_CAPTION, submit_caption),
+                (ATTR_LINK_NAME, link_name),
+                (ATTR_LINK_URL, link_url),
             ] if value is not None
         })
 
@@ -133,7 +137,7 @@ class Configurator(object):
         return request_id
 
     def notify_errors(self, request_id, error):
-        """ Update the state with errors. """
+        """Update the state with errors."""
         if not self._validate_request_id(request_id):
             return
 
@@ -141,13 +145,13 @@ class Configurator(object):
 
         state = self.hass.states.get(entity_id)
 
-        new_data = state.attributes
+        new_data = dict(state.attributes)
         new_data[ATTR_ERRORS] = error
 
         self.hass.states.set(entity_id, STATE_CONFIGURE, new_data)
 
     def request_done(self, request_id):
-        """ Remove the config request. """
+        """Remove the configuration request."""
         if not self._validate_request_id(request_id):
             return
 
@@ -160,13 +164,13 @@ class Configurator(object):
         self.hass.states.set(entity_id, STATE_CONFIGURED)
 
         def deferred_remove(event):
-            """ Remove the request state. """
+            """Remove the request state."""
             self.hass.states.remove(entity_id)
 
         self.hass.bus.listen_once(EVENT_TIME_CHANGED, deferred_remove)
 
     def handle_service_call(self, call):
-        """ Handle a configure service call. """
+        """Handle a configure service call."""
         request_id = call.data.get(ATTR_CONFIGURE_ID)
 
         if not self._validate_request_id(request_id):
@@ -180,10 +184,10 @@ class Configurator(object):
         callback(call.data.get(ATTR_FIELDS, {}))
 
     def _generate_unique_id(self):
-        """ Generates a unique configurator id. """
+        """Generate a unique configurator ID."""
         self._cur_id += 1
         return "{}-{}".format(id(self), self._cur_id)
 
     def _validate_request_id(self, request_id):
-        """ Validate that the request belongs to this instance. """
+        """Validate that the request belongs to this instance."""
         return request_id in self._requests

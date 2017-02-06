@@ -1,65 +1,55 @@
 """
-homeassistant.components.automation.template
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Offers template automation rules.
+Offer template automation rules.
 
 For more details about this automation rule, please refer to the documentation
 at https://home-assistant.io/components/automation/#template-trigger
 """
 import logging
 
-from homeassistant.const import CONF_VALUE_TEMPLATE, EVENT_STATE_CHANGED
-from homeassistant.exceptions import TemplateError
-from homeassistant.util import template
+import voluptuous as vol
+
+from homeassistant.core import callback
+from homeassistant.const import CONF_VALUE_TEMPLATE, CONF_PLATFORM
+from homeassistant.helpers import condition
+from homeassistant.helpers.event import async_track_state_change
+import homeassistant.helpers.config_validation as cv
+
 
 _LOGGER = logging.getLogger(__name__)
 
+TRIGGER_SCHEMA = IF_ACTION_SCHEMA = vol.Schema({
+    vol.Required(CONF_PLATFORM): 'template',
+    vol.Required(CONF_VALUE_TEMPLATE): cv.template,
+})
 
-def trigger(hass, config, action):
-    """ Listen for state changes based on `config`. """
+
+def async_trigger(hass, config, action):
+    """Listen for state changes based on configuration."""
     value_template = config.get(CONF_VALUE_TEMPLATE)
-
-    if value_template is None:
-        _LOGGER.error("Missing configuration key %s", CONF_VALUE_TEMPLATE)
-        return False
+    value_template.hass = hass
 
     # Local variable to keep track of if the action has already been triggered
     already_triggered = False
 
-    def event_listener(event):
-        """ Listens for state changes and calls action. """
+    @callback
+    def state_changed_listener(entity_id, from_s, to_s):
+        """Listen for state changes and calls action."""
         nonlocal already_triggered
-        template_result = _check_template(hass, value_template)
+        template_result = condition.async_template(hass, value_template)
 
         # Check to see if template returns true
         if template_result and not already_triggered:
             already_triggered = True
-            action()
+            hass.async_run_job(action, {
+                'trigger': {
+                    'platform': 'template',
+                    'entity_id': entity_id,
+                    'from_state': from_s,
+                    'to_state': to_s,
+                },
+            })
         elif not template_result:
             already_triggered = False
 
-    hass.bus.listen(EVENT_STATE_CHANGED, event_listener)
-    return True
-
-
-def if_action(hass, config):
-    """ Wraps action method with state based condition. """
-
-    value_template = config.get(CONF_VALUE_TEMPLATE)
-
-    if value_template is None:
-        _LOGGER.error("Missing configuration key %s", CONF_VALUE_TEMPLATE)
-        return False
-
-    return lambda: _check_template(hass, value_template)
-
-
-def _check_template(hass, value_template):
-    """ Checks if result of template is true """
-    try:
-        value = template.render(hass, value_template, {})
-    except TemplateError:
-        _LOGGER.exception('Error parsing template')
-        return False
-
-    return value.lower() == 'true'
+    return async_track_state_change(hass, value_template.extract_entities(),
+                                    state_changed_listener)

@@ -1,116 +1,171 @@
 """
-homeassistant.components.media_player.kodi
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Provides an interface to the XBMC/Kodi JSON-RPC API
+Support for interfacing with the XBMC/Kodi JSON-RPC API.
 
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/media_player.kodi/
 """
-import urllib
+import asyncio
 import logging
+import urllib
+
+import aiohttp
+import voluptuous as vol
 
 from homeassistant.components.media_player import (
-    MediaPlayerDevice, SUPPORT_PAUSE, SUPPORT_SEEK, SUPPORT_VOLUME_SET,
-    SUPPORT_VOLUME_MUTE, SUPPORT_PREVIOUS_TRACK, SUPPORT_NEXT_TRACK)
+    SUPPORT_NEXT_TRACK, SUPPORT_PAUSE, SUPPORT_PREVIOUS_TRACK, SUPPORT_SEEK,
+    SUPPORT_PLAY_MEDIA, SUPPORT_VOLUME_MUTE, SUPPORT_VOLUME_SET, SUPPORT_STOP,
+    SUPPORT_TURN_OFF, SUPPORT_PLAY, SUPPORT_VOLUME_STEP, MediaPlayerDevice,
+    PLATFORM_SCHEMA)
 from homeassistant.const import (
-    STATE_IDLE, STATE_PLAYING, STATE_PAUSED, STATE_OFF)
+    STATE_IDLE, STATE_OFF, STATE_PAUSED, STATE_PLAYING, CONF_HOST, CONF_NAME,
+    CONF_PORT, CONF_SSL, CONF_USERNAME, CONF_PASSWORD)
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+import homeassistant.helpers.config_validation as cv
+
+REQUIREMENTS = ['jsonrpc-async==0.2']
 
 _LOGGER = logging.getLogger(__name__)
-REQUIREMENTS = ['jsonrpc-requests==0.1']
+
+CONF_TURN_OFF_ACTION = 'turn_off_action'
+
+DEFAULT_NAME = 'Kodi'
+DEFAULT_PORT = 8080
+DEFAULT_TIMEOUT = 5
+DEFAULT_SSL = False
+
+TURN_OFF_ACTION = [None, 'quit', 'hibernate', 'suspend', 'reboot', 'shutdown']
 
 SUPPORT_KODI = SUPPORT_PAUSE | SUPPORT_VOLUME_SET | SUPPORT_VOLUME_MUTE | \
-    SUPPORT_PREVIOUS_TRACK | SUPPORT_NEXT_TRACK | SUPPORT_SEEK
+    SUPPORT_PREVIOUS_TRACK | SUPPORT_NEXT_TRACK | SUPPORT_SEEK | \
+    SUPPORT_PLAY_MEDIA | SUPPORT_STOP | SUPPORT_PLAY | SUPPORT_VOLUME_STEP
+
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
+    vol.Required(CONF_HOST): cv.string,
+    vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
+    vol.Optional(CONF_PORT, default=DEFAULT_PORT): cv.port,
+    vol.Optional(CONF_SSL, default=DEFAULT_SSL): cv.boolean,
+    vol.Optional(CONF_TURN_OFF_ACTION, default=None): vol.In(TURN_OFF_ACTION),
+    vol.Inclusive(CONF_USERNAME, 'auth'): cv.string,
+    vol.Inclusive(CONF_PASSWORD, 'auth'): cv.string,
+})
 
 
-# pylint: disable=unused-argument
-def setup_platform(hass, config, add_devices, discovery_info=None):
-    """ Sets up the kodi platform. """
+@asyncio.coroutine
+def async_setup_platform(hass, config, async_add_entities,
+                         discovery_info=None):
+    """Setup the Kodi platform."""
+    host = config.get(CONF_HOST)
+    port = config.get(CONF_PORT)
+    use_encryption = config.get(CONF_SSL)
 
-    add_devices([
-        KodiDevice(
-            config.get('name', 'Kodi'),
-            config.get('url'),
-            auth=(
-                config.get('user', ''),
-                config.get('password', ''))),
-    ])
+    if host.startswith('http://') or host.startswith('https://'):
+        host = host.lstrip('http://').lstrip('https://')
+        _LOGGER.warning(
+            "Kodi host name should no longer conatin http:// See updated "
+            "definitions here: "
+            "https://home-assistant.io/components/media_player.kodi/")
 
+    entity = KodiDevice(
+        hass,
+        name=config.get(CONF_NAME),
+        host=host, port=port, encryption=use_encryption,
+        username=config.get(CONF_USERNAME),
+        password=config.get(CONF_PASSWORD),
+        turn_off_action=config.get(CONF_TURN_OFF_ACTION))
 
-def _get_image_url(kodi_url):
-    """ Helper function that parses the thumbnail URLs used by Kodi. """
-    url_components = urllib.parse.urlparse(kodi_url)
-
-    if url_components.scheme == 'image':
-        return urllib.parse.unquote(url_components.netloc)
+    yield from async_add_entities([entity], update_before_add=True)
 
 
 class KodiDevice(MediaPlayerDevice):
-    """ Represents a XBMC/Kodi device. """
+    """Representation of a XBMC/Kodi device."""
 
-    # pylint: disable=too-many-public-methods
-
-    def __init__(self, name, url, auth=None):
-        import jsonrpc_requests
+    def __init__(self, hass, name, host, port, encryption=False, username=None,
+                 password=None, turn_off_action=None):
+        """Initialize the Kodi device."""
+        import jsonrpc_async
+        self.hass = hass
         self._name = name
-        self._url = url
-        self._server = jsonrpc_requests.Server(url, auth=auth)
-        self._players = None
+
+        kwargs = {
+            'timeout': DEFAULT_TIMEOUT,
+            'session': async_get_clientsession(hass),
+        }
+
+        if username is not None:
+            kwargs['auth'] = aiohttp.BasicAuth(username, password)
+            image_auth_string = "{}:{}@".format(username, password)
+        else:
+            image_auth_string = ""
+
+        protocol = 'https' if encryption else 'http'
+
+        self._http_url = '{}://{}:{}/jsonrpc'.format(protocol, host, port)
+        self._image_url = '{}://{}{}:{}/image'.format(
+            protocol, image_auth_string, host, port)
+
+        self._server = jsonrpc_async.Server(self._http_url, **kwargs)
+
+        self._turn_off_action = turn_off_action
+        self._players = list()
         self._properties = None
         self._item = None
         self._app_properties = None
 
-        self.update()
-
     @property
     def name(self):
-        """ Returns the name of the device. """
+        """Return the name of the device."""
         return self._name
 
+    @asyncio.coroutine
     def _get_players(self):
-        """ Returns the active player objects or None """
-        import jsonrpc_requests
+        """Return the active player objects or None."""
+        import jsonrpc_async
         try:
-            return self._server.Player.GetActivePlayers()
-        except jsonrpc_requests.jsonrpc.TransportError:
-            _LOGGER.exception('Unable to fetch kodi data')
+            return (yield from self._server.Player.GetActivePlayers())
+        except jsonrpc_async.jsonrpc.TransportError:
+            if self._players is not None:
+                _LOGGER.info('Unable to fetch kodi data')
+                _LOGGER.debug('Unable to fetch kodi data', exc_info=True)
             return None
 
     @property
     def state(self):
-        """ Returns the state of the device. """
+        """Return the state of the device."""
         if self._players is None:
             return STATE_OFF
 
         if len(self._players) == 0:
             return STATE_IDLE
 
-        if self._properties['speed'] == 0:
+        if self._properties['speed'] == 0 and not self._properties['live']:
             return STATE_PAUSED
         else:
             return STATE_PLAYING
 
-    def update(self):
-        """ Retrieve latest state. """
-        self._players = self._get_players()
+    @asyncio.coroutine
+    def async_update(self):
+        """Retrieve latest state."""
+        self._players = yield from self._get_players()
 
         if self._players is not None and len(self._players) > 0:
             player_id = self._players[0]['playerid']
 
             assert isinstance(player_id, int)
 
-            self._properties = self._server.Player.GetProperties(
+            self._properties = yield from self._server.Player.GetProperties(
                 player_id,
-                ['time', 'totaltime', 'speed']
+                ['time', 'totaltime', 'speed', 'live']
             )
 
-            self._item = self._server.Player.GetItem(
+            self._item = (yield from self._server.Player.GetItem(
                 player_id,
                 ['title', 'file', 'uniqueid', 'thumbnail', 'artist']
-            )['item']
+            ))['item']
 
-            self._app_properties = self._server.Application.GetProperties(
-                ['volume', 'muted']
-            )
+            self._app_properties = \
+                yield from self._server.Application.GetProperties(
+                    ['volume', 'muted']
+                )
         else:
             self._properties = None
             self._item = None
@@ -118,32 +173,32 @@ class KodiDevice(MediaPlayerDevice):
 
     @property
     def volume_level(self):
-        """ Volume level of the media player (0..1). """
+        """Volume level of the media player (0..1)."""
         if self._app_properties is not None:
             return self._app_properties['volume'] / 100.0
 
     @property
     def is_volume_muted(self):
-        """ Boolean if volume is currently muted. """
+        """Boolean if volume is currently muted."""
         if self._app_properties is not None:
             return self._app_properties['muted']
 
     @property
     def media_content_id(self):
-        """ Content ID of current playing media. """
+        """Content ID of current playing media."""
         if self._item is not None:
             return self._item.get('uniqueid', None)
 
     @property
     def media_content_type(self):
-        """ Content type of current playing media. """
+        """Content type of current playing media."""
         if self._players is not None and len(self._players) > 0:
             return self._players[0]['type']
 
     @property
     def media_duration(self):
-        """ Duration of current playing media in seconds. """
-        if self._properties is not None:
+        """Duration of current playing media in seconds."""
+        if self._properties is not None and not self._properties['live']:
             total_time = self._properties['totaltime']
 
             return (
@@ -153,97 +208,147 @@ class KodiDevice(MediaPlayerDevice):
 
     @property
     def media_image_url(self):
-        """ Image url of current playing media. """
-        if self._item is not None:
-            return _get_image_url(self._item['thumbnail'])
+        """Image url of current playing media."""
+        if self._item is None:
+            return None
+
+        url_components = urllib.parse.urlparse(self._item['thumbnail'])
+        if url_components.scheme == 'image':
+            return '{}/{}'.format(
+                self._image_url,
+                urllib.parse.quote_plus(self._item['thumbnail']))
 
     @property
     def media_title(self):
-        """ Title of current playing media. """
+        """Title of current playing media."""
         # find a string we can use as a title
         if self._item is not None:
             return self._item.get(
                 'title',
-                self._item.get(
-                    'label',
-                    self._item.get(
-                        'file',
-                        'unknown')))
+                self._item.get('label', self._item.get('file', 'unknown')))
 
     @property
     def supported_media_commands(self):
-        """ Flags of media commands that are supported. """
-        return SUPPORT_KODI
+        """Flag of media commands that are supported."""
+        supported_media_commands = SUPPORT_KODI
 
-    def turn_off(self):
-        """ turn_off media player. """
-        self._server.System.Shutdown()
-        self.update_ha_state()
+        if self._turn_off_action in TURN_OFF_ACTION:
+            supported_media_commands |= SUPPORT_TURN_OFF
 
-    def volume_up(self):
-        """ volume_up media player. """
-        assert self._server.Input.ExecuteAction('volumeup') == 'OK'
-        self.update_ha_state()
+        return supported_media_commands
 
-    def volume_down(self):
-        """ volume_down media player. """
-        assert self._server.Input.ExecuteAction('volumedown') == 'OK'
-        self.update_ha_state()
+    @asyncio.coroutine
+    def async_turn_off(self):
+        """Execute turn_off_action to turn off media player."""
+        if self._turn_off_action == 'quit':
+            yield from self._server.Application.Quit()
+        elif self._turn_off_action == 'hibernate':
+            yield from self._server.System.Hibernate()
+        elif self._turn_off_action == 'suspend':
+            yield from self._server.System.Suspend()
+        elif self._turn_off_action == 'reboot':
+            yield from self._server.System.Reboot()
+        elif self._turn_off_action == 'shutdown':
+            yield from self._server.System.Shutdown()
+        else:
+            _LOGGER.warning('turn_off requested but turn_off_action is none')
 
-    def set_volume_level(self, volume):
-        """ set volume level, range 0..1. """
-        self._server.Application.SetVolume(int(volume * 100))
-        self.update_ha_state()
+    @asyncio.coroutine
+    def async_volume_up(self):
+        """Volume up the media player."""
+        assert (
+            yield from self._server.Input.ExecuteAction('volumeup')) == 'OK'
 
-    def mute_volume(self, mute):
-        """ mute (true) or unmute (false) media player. """
-        self._server.Application.SetMute(mute)
-        self.update_ha_state()
+    @asyncio.coroutine
+    def async_volume_down(self):
+        """Volume down the media player."""
+        assert (
+            yield from self._server.Input.ExecuteAction('volumedown')) == 'OK'
 
-    def _set_play_state(self, state):
-        """ Helper method for play/pause/toggle. """
-        players = self._get_players()
+    def async_set_volume_level(self, volume):
+        """Set volume level, range 0..1.
+
+        This method must be run in the event loop and returns a coroutine.
+        """
+        return self._server.Application.SetVolume(int(volume * 100))
+
+    def async_mute_volume(self, mute):
+        """Mute (true) or unmute (false) media player.
+
+        This method must be run in the event loop and returns a coroutine.
+        """
+        return self._server.Application.SetMute(mute)
+
+    @asyncio.coroutine
+    def async_set_play_state(self, state):
+        """Helper method for play/pause/toggle."""
+        players = yield from self._get_players()
 
         if len(players) != 0:
-            self._server.Player.PlayPause(players[0]['playerid'], state)
+            yield from self._server.Player.PlayPause(
+                players[0]['playerid'], state)
 
-        self.update_ha_state()
+    def async_media_play_pause(self):
+        """Pause media on media player.
 
-    def media_play_pause(self):
-        """ media_play_pause media player. """
-        self._set_play_state('toggle')
+        This method must be run in the event loop and returns a coroutine.
+        """
+        return self.async_set_play_state('toggle')
 
-    def media_play(self):
-        """ media_play media player. """
-        self._set_play_state(True)
+    def async_media_play(self):
+        """Play media.
 
-    def media_pause(self):
-        """ media_pause media player. """
-        self._set_play_state(False)
+        This method must be run in the event loop and returns a coroutine.
+        """
+        return self.async_set_play_state(True)
 
+    def async_media_pause(self):
+        """Pause the media player.
+
+        This method must be run in the event loop and returns a coroutine.
+        """
+        return self.async_set_play_state(False)
+
+    @asyncio.coroutine
+    def async_media_stop(self):
+        """Stop the media player."""
+        players = yield from self._get_players()
+
+        if len(players) != 0:
+            yield from self._server.Player.Stop(players[0]['playerid'])
+
+    @asyncio.coroutine
     def _goto(self, direction):
-        """ Helper method used for previous/next track. """
-        players = self._get_players()
+        """Helper method used for previous/next track."""
+        players = yield from self._get_players()
 
         if len(players) != 0:
-            self._server.Player.GoTo(players[0]['playerid'], direction)
+            if direction == 'previous':
+                # first seek to position 0. Kodi goes to the beginning of the
+                # current track if the current track is not at the beginning.
+                yield from self._server.Player.Seek(players[0]['playerid'], 0)
 
-        self.update_ha_state()
+            yield from self._server.Player.GoTo(
+                players[0]['playerid'], direction)
 
-    def media_next_track(self):
-        """ Send next track command. """
-        self._goto('next')
+    def async_media_next_track(self):
+        """Send next track command.
 
-    def media_previous_track(self):
-        """ Send next track command. """
-        # first seek to position 0, Kodi seems to go to the beginning
-        # of the current track current track is not at the beginning
-        self.media_seek(0)
-        self._goto('previous')
+        This method must be run in the event loop and returns a coroutine.
+        """
+        return self._goto('next')
 
-    def media_seek(self, position):
-        """ Send seek command. """
-        players = self._get_players()
+    def async_media_previous_track(self):
+        """Send next track command.
+
+        This method must be run in the event loop and returns a coroutine.
+        """
+        return self._goto('previous')
+
+    @asyncio.coroutine
+    def async_media_seek(self, position):
+        """Send seek command."""
+        players = yield from self._get_players()
 
         time = {}
 
@@ -259,14 +364,16 @@ class KodiDevice(MediaPlayerDevice):
         time['hours'] = int(position)
 
         if len(players) != 0:
-            self._server.Player.Seek(players[0]['playerid'], time)
+            yield from self._server.Player.Seek(players[0]['playerid'], time)
 
-        self.update_ha_state()
+    def async_play_media(self, media_type, media_id, **kwargs):
+        """Send the play_media command to the media player.
 
-    def turn_on(self):
-        """ turn the media player on. """
-        raise NotImplementedError()
-
-    def play_youtube(self, media_id):
-        """ Plays a YouTube media. """
-        raise NotImplementedError()
+        This method must be run in the event loop and returns a coroutine.
+        """
+        if media_type == "CHANNEL":
+            return self._server.Player.Open(
+                {"item": {"channelid": int(media_id)}})
+        else:
+            return self._server.Player.Open(
+                {"item": {"file": str(media_id)}})

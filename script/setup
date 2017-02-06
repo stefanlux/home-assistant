@@ -1,5 +1,10 @@
-cd "$(dirname "$0")/.."
+#!/bin/sh
+# Setups the repository.
 
+# Stop on errors
+set -e
+
+cd "$(dirname "$0")/.."
 git submodule init
 script/bootstrap
 python3 setup.py develop

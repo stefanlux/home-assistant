@@ -1,24 +1,30 @@
 """
-homeassistant.components.switch.mysensors
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Support for MySensors switches.
 
 For more details about this platform, please refer to the documentation at
-https://home-assistant.io/components/sensor.mysensors.html
+https://home-assistant.io/components/switch.mysensors/
 """
 import logging
-from collections import defaultdict
+import os
 
-from homeassistant.components.switch import SwitchDevice
+import voluptuous as vol
 
-from homeassistant.const import (
-    ATTR_BATTERY_LEVEL,
-    STATE_ON, STATE_OFF)
-
-import homeassistant.components.mysensors as mysensors
+import homeassistant.helpers.config_validation as cv
+from homeassistant.components import mysensors
+from homeassistant.components.switch import DOMAIN, SwitchDevice
+from homeassistant.config import load_yaml_config_file
+from homeassistant.const import ATTR_ENTITY_ID, STATE_OFF, STATE_ON
 
 _LOGGER = logging.getLogger(__name__)
 DEPENDENCIES = []
+
+ATTR_IR_CODE = 'V_IR_SEND'
+SERVICE_SEND_IR_CODE = 'mysensors_send_ir_code'
+
+SEND_IR_CODE_SERVICE_SCHEMA = vol.Schema({
+    vol.Optional(ATTR_ENTITY_ID): cv.entity_ids,
+    vol.Required(ATTR_IR_CODE): cv.string,
+})
 
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
@@ -28,102 +34,99 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
     if discovery_info is None:
         return
 
-    for gateway in mysensors.GATEWAYS.values():
+    gateways = hass.data.get(mysensors.MYSENSORS_GATEWAYS)
+    if not gateways:
+        return
+
+    platform_devices = []
+
+    for gateway in gateways:
         # Define the S_TYPES and V_TYPES that the platform should handle as
-        # states.
-        s_types = [
-            gateway.const.Presentation.S_DOOR,
-            gateway.const.Presentation.S_MOTION,
-            gateway.const.Presentation.S_SMOKE,
-            gateway.const.Presentation.S_LIGHT,
-            gateway.const.Presentation.S_LOCK,
-        ]
-        v_types = [
-            gateway.const.SetReq.V_ARMED,
-            gateway.const.SetReq.V_LIGHT,
-            gateway.const.SetReq.V_LOCK_STATUS,
-        ]
-        if float(gateway.version) >= 1.5:
-            s_types.extend([
-                gateway.const.Presentation.S_BINARY,
-                gateway.const.Presentation.S_SPRINKLER,
-                gateway.const.Presentation.S_WATER_LEAK,
-                gateway.const.Presentation.S_SOUND,
-                gateway.const.Presentation.S_VIBRATION,
-                gateway.const.Presentation.S_MOISTURE,
-            ])
-            v_types.extend([gateway.const.SetReq.V_STATUS, ])
-
-        devices = defaultdict(list)
-        gateway.platform_callbacks.append(mysensors.pf_callback_factory(
-            s_types, v_types, devices, add_devices, MySensorsSwitch))
-
-
-class MySensorsSwitch(SwitchDevice):
-    """Represent the value of a MySensors child node."""
-
-    # pylint: disable=too-many-arguments
-
-    def __init__(self, gateway, node_id, child_id, name, value_type):
-        """Setup class attributes on instantiation.
-
-        Args:
-        gateway (GatewayWrapper): Gateway object.
-        node_id (str): Id of node.
-        child_id (str): Id of child.
-        name (str): Entity name.
-        value_type (str): Value type of child. Value is entity state.
-
-        Attributes:
-        gateway (GatewayWrapper): Gateway object
-        node_id (str): Id of node.
-        child_id (str): Id of child.
-        _name (str): Entity name.
-        value_type (str): Value type of child. Value is entity state.
-        battery_level (int): Node battery level.
-        _values (dict): Child values. Non state values set as state attributes.
-        """
-        self.gateway = gateway
-        self.node_id = node_id
-        self.child_id = child_id
-        self._name = name
-        self.value_type = value_type
-        self.battery_level = 0
-        self._values = {}
-
-    @property
-    def should_poll(self):
-        """MySensor gateway pushes its state to HA."""
-        return False
-
-    @property
-    def name(self):
-        """The name of this entity."""
-        return self._name
-
-    @property
-    def device_state_attributes(self):
-        """Return device specific state attributes."""
-        device_attr = dict(self._values)
-        device_attr.pop(self.value_type, None)
-        return device_attr
-
-    @property
-    def state_attributes(self):
-        """Return the state attributes."""
-        data = {
-            mysensors.ATTR_PORT: self.gateway.port,
-            mysensors.ATTR_NODE_ID: self.node_id,
-            mysensors.ATTR_CHILD_ID: self.child_id,
-            ATTR_BATTERY_LEVEL: self.battery_level,
+        # states. Map them in a dict of lists.
+        pres = gateway.const.Presentation
+        set_req = gateway.const.SetReq
+        map_sv_types = {
+            pres.S_DOOR: [set_req.V_ARMED],
+            pres.S_MOTION: [set_req.V_ARMED],
+            pres.S_SMOKE: [set_req.V_ARMED],
+            pres.S_LIGHT: [set_req.V_LIGHT],
+            pres.S_LOCK: [set_req.V_LOCK_STATUS],
+            pres.S_IR: [set_req.V_IR_SEND],
         }
+        device_class_map = {
+            pres.S_DOOR: MySensorsSwitch,
+            pres.S_MOTION: MySensorsSwitch,
+            pres.S_SMOKE: MySensorsSwitch,
+            pres.S_LIGHT: MySensorsSwitch,
+            pres.S_LOCK: MySensorsSwitch,
+            pres.S_IR: MySensorsIRSwitch,
+        }
+        if float(gateway.protocol_version) >= 1.5:
+            map_sv_types.update({
+                pres.S_BINARY: [set_req.V_STATUS, set_req.V_LIGHT],
+                pres.S_SPRINKLER: [set_req.V_STATUS],
+                pres.S_WATER_LEAK: [set_req.V_ARMED],
+                pres.S_SOUND: [set_req.V_ARMED],
+                pres.S_VIBRATION: [set_req.V_ARMED],
+                pres.S_MOISTURE: [set_req.V_ARMED],
+            })
+            map_sv_types[pres.S_LIGHT].append(set_req.V_STATUS)
+            device_class_map.update({
+                pres.S_BINARY: MySensorsSwitch,
+                pres.S_SPRINKLER: MySensorsSwitch,
+                pres.S_WATER_LEAK: MySensorsSwitch,
+                pres.S_SOUND: MySensorsSwitch,
+                pres.S_VIBRATION: MySensorsSwitch,
+                pres.S_MOISTURE: MySensorsSwitch,
+            })
+        if float(gateway.protocol_version) >= 2.0:
+            map_sv_types.update({
+                pres.S_WATER_QUALITY: [set_req.V_STATUS],
+            })
+            device_class_map.update({
+                pres.S_WATER_QUALITY: MySensorsSwitch,
+            })
 
-        device_attr = self.device_state_attributes
+        devices = {}
+        gateway.platform_callbacks.append(mysensors.pf_callback_factory(
+            map_sv_types, devices, device_class_map, add_devices))
+        platform_devices.append(devices)
 
-        if device_attr is not None:
-            data.update(device_attr)
+    def send_ir_code_service(service):
+        """Set IR code as device state attribute."""
+        entity_ids = service.data.get(ATTR_ENTITY_ID)
+        ir_code = service.data.get(ATTR_IR_CODE)
 
-        return data
+        if entity_ids:
+            _devices = [device for gw_devs in platform_devices
+                        for device in gw_devs.values()
+                        if isinstance(device, MySensorsIRSwitch) and
+                        device.entity_id in entity_ids]
+        else:
+            _devices = [device for gw_devs in platform_devices
+                        for device in gw_devs.values()
+                        if isinstance(device, MySensorsIRSwitch)]
+
+        kwargs = {ATTR_IR_CODE: ir_code}
+        for device in _devices:
+            device.turn_on(**kwargs)
+
+    descriptions = load_yaml_config_file(
+        os.path.join(os.path.dirname(__file__), 'services.yaml'))
+
+    hass.services.register(DOMAIN, SERVICE_SEND_IR_CODE,
+                           send_ir_code_service,
+                           descriptions.get(SERVICE_SEND_IR_CODE),
+                           schema=SEND_IR_CODE_SERVICE_SCHEMA)
+
+
+class MySensorsSwitch(mysensors.MySensorsDeviceEntity, SwitchDevice):
+    """Representation of the value of a MySensors Switch child node."""
+
+    @property
+    def assumed_state(self):
+        """Return True if unable to access real state of entity."""
+        return self.gateway.optimistic
 
     @property
     def is_on(self):
@@ -136,29 +139,74 @@ class MySensorsSwitch(SwitchDevice):
         """Turn the switch on."""
         self.gateway.set_child_value(
             self.node_id, self.child_id, self.value_type, 1)
-        self._values[self.value_type] = STATE_ON
-        self.update_ha_state()
+        if self.gateway.optimistic:
+            # optimistically assume that switch has changed state
+            self._values[self.value_type] = STATE_ON
+            self.schedule_update_ha_state()
 
     def turn_off(self):
         """Turn the switch off."""
         self.gateway.set_child_value(
             self.node_id, self.child_id, self.value_type, 0)
-        self._values[self.value_type] = STATE_OFF
-        self.update_ha_state()
+        if self.gateway.optimistic:
+            # optimistically assume that switch has changed state
+            self._values[self.value_type] = STATE_OFF
+            self.schedule_update_ha_state()
+
+
+class MySensorsIRSwitch(MySensorsSwitch):
+    """IR switch child class to MySensorsSwitch."""
+
+    def __init__(self, *args):
+        """Setup instance attributes."""
+        MySensorsSwitch.__init__(self, *args)
+        self._ir_code = None
+
+    @property
+    def is_on(self):
+        """Return True if switch is on."""
+        set_req = self.gateway.const.SetReq
+        if set_req.V_LIGHT in self._values:
+            return self._values[set_req.V_LIGHT] == STATE_ON
+        return False
+
+    def turn_on(self, **kwargs):
+        """Turn the IR switch on."""
+        set_req = self.gateway.const.SetReq
+        if set_req.V_LIGHT not in self._values:
+            _LOGGER.error('missing value_type: %s at node: %s, child: %s',
+                          set_req.V_LIGHT.name, self.node_id, self.child_id)
+            return
+        if ATTR_IR_CODE in kwargs:
+            self._ir_code = kwargs[ATTR_IR_CODE]
+        self.gateway.set_child_value(
+            self.node_id, self.child_id, self.value_type, self._ir_code)
+        self.gateway.set_child_value(
+            self.node_id, self.child_id, set_req.V_LIGHT, 1)
+        if self.gateway.optimistic:
+            # optimistically assume that switch has changed state
+            self._values[self.value_type] = self._ir_code
+            self._values[set_req.V_LIGHT] = STATE_ON
+            self.schedule_update_ha_state()
+            # turn off switch after switch was turned on
+            self.turn_off()
+
+    def turn_off(self):
+        """Turn the IR switch off."""
+        set_req = self.gateway.const.SetReq
+        if set_req.V_LIGHT not in self._values:
+            _LOGGER.error('missing value_type: %s at node: %s, child: %s',
+                          set_req.V_LIGHT.name, self.node_id, self.child_id)
+            return
+        self.gateway.set_child_value(
+            self.node_id, self.child_id, set_req.V_LIGHT, 0)
+        if self.gateway.optimistic:
+            # optimistically assume that switch has changed state
+            self._values[set_req.V_LIGHT] = STATE_OFF
+            self.schedule_update_ha_state()
 
     def update(self):
         """Update the controller with the latest value from a sensor."""
-        node = self.gateway.sensors[self.node_id]
-        child = node.children[self.child_id]
-        for value_type, value in child.values.items():
-            _LOGGER.info(
-                "%s: value_type %s, value = %s", self._name, value_type, value)
-            if value_type == self.gateway.const.SetReq.V_ARMED or \
-               value_type == self.gateway.const.SetReq.V_STATUS or \
-               value_type == self.gateway.const.SetReq.V_LIGHT or \
-               value_type == self.gateway.const.SetReq.V_LOCK_STATUS:
-                self._values[value_type] = (
-                    STATE_ON if int(value) == 1 else STATE_OFF)
-            else:
-                self._values[value_type] = value
-        self.battery_level = node.battery_level
+        MySensorsSwitch.update(self)
+        if self.value_type in self._values:
+            self._ir_code = self._values[self.value_type]

@@ -1,44 +1,44 @@
 """
-homeassistant.components.notify.free_mobile
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Free Mobile SMS platform for notify component.
+Support for thr Free Mobile SMS platform.
 
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/notify.free_mobile/
 """
 import logging
-from homeassistant.helpers import validate_config
+
+import voluptuous as vol
+
 from homeassistant.components.notify import (
-    DOMAIN, BaseNotificationService)
-from homeassistant.const import CONF_USERNAME, CONF_ACCESS_TOKEN
+    PLATFORM_SCHEMA, BaseNotificationService)
+from homeassistant.const import CONF_ACCESS_TOKEN, CONF_USERNAME
+import homeassistant.helpers.config_validation as cv
 
 _LOGGER = logging.getLogger(__name__)
-REQUIREMENTS = ['freesms==0.1.0']
+REQUIREMENTS = ['freesms==0.1.1']
 
 
-def get_service(hass, config):
-    """ Get the Free Mobile SMS notification service. """
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
+    vol.Required(CONF_USERNAME): cv.string,
+    vol.Required(CONF_ACCESS_TOKEN): cv.string,
+})
 
-    if not validate_config({DOMAIN: config},
-                           {DOMAIN: [CONF_USERNAME,
-                                     CONF_ACCESS_TOKEN]},
-                           _LOGGER):
-        return None
 
+def get_service(hass, config, discovery_info=None):
+    """Get the Free Mobile SMS notification service."""
     return FreeSMSNotificationService(config[CONF_USERNAME],
                                       config[CONF_ACCESS_TOKEN])
 
 
-# pylint: disable=too-few-public-methods
 class FreeSMSNotificationService(BaseNotificationService):
-    """ Implements notification service for the Free Mobile SMS service. """
+    """Implement a notification service for the Free Mobile SMS service."""
 
     def __init__(self, username, access_token):
+        """Initialize the service."""
         from freesms import FreeClient
         self.free_client = FreeClient(username, access_token)
 
     def send_message(self, message="", **kwargs):
-        """ Send a message to the Free Mobile user cell. """
+        """Send a message to the Free Mobile user cell."""
         resp = self.free_client.send_sms(message)
 
         if resp.status_code == 400:

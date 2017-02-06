@@ -1,62 +1,71 @@
 """
-homeassistant.components.mqtt_eventstream
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Connect two Home Assistant instances via mqtt.
+Connect two Home Assistant instances via MQTT.
 
-Configuration:
-
-To use the mqtt_eventstream component you will need to add the following to
-your configuration.yaml file.
-
-If you do not specify a publish_topic you will not forward events to the queue.
-If you do not specify a subscribe_topic then you will not receive events from
-the remote server.
-
-mqtt_eventstream:
-  publish_topic: MyServerName
-  subscribe_topic: OtherHaServerName
+For more details about this component, please refer to the documentation at
+https://home-assistant.io/components/mqtt_eventstream/
 """
 import json
-from homeassistant.core import EventOrigin, State
-from homeassistant.components.mqtt import DOMAIN as MQTT_DOMAIN
-from homeassistant.components.mqtt import SERVICE_PUBLISH as MQTT_SVC_PUBLISH
-from homeassistant.const import (
-    MATCH_ALL,
-    EVENT_TIME_CHANGED,
-    EVENT_CALL_SERVICE,
-    EVENT_SERVICE_EXECUTED,
-    EVENT_STATE_CHANGED,
-)
+
+import voluptuous as vol
+
 import homeassistant.loader as loader
+from homeassistant.components.mqtt import (
+    valid_publish_topic, valid_subscribe_topic)
+from homeassistant.const import (
+    ATTR_SERVICE_DATA, EVENT_CALL_SERVICE, EVENT_SERVICE_EXECUTED,
+    EVENT_STATE_CHANGED, EVENT_TIME_CHANGED, MATCH_ALL)
+from homeassistant.core import EventOrigin, State
+import homeassistant.helpers.config_validation as cv
 from homeassistant.remote import JSONEncoder
+from .mqtt import EVENT_MQTT_MESSAGE_RECEIVED
 
-# The domain of your component. Should be equal to the name of your component
 DOMAIN = "mqtt_eventstream"
-
-# List of component names (string) your component depends upon
 DEPENDENCIES = ['mqtt']
+
+CONF_PUBLISH_TOPIC = 'publish_topic'
+CONF_SUBSCRIBE_TOPIC = 'subscribe_topic'
+CONF_PUBLISH_EVENTSTREAM_RECEIVED = 'publish_eventstream_received'
+
+CONFIG_SCHEMA = vol.Schema({
+    DOMAIN: vol.Schema({
+        vol.Optional(CONF_PUBLISH_TOPIC): valid_publish_topic,
+        vol.Optional(CONF_SUBSCRIBE_TOPIC): valid_subscribe_topic,
+        vol.Optional(CONF_PUBLISH_EVENTSTREAM_RECEIVED, default=False):
+            cv.boolean,
+    }),
+}, extra=vol.ALLOW_EXTRA)
 
 
 def setup(hass, config):
-    """ Setup our mqtt_eventstream component. """
+    """Setup the MQTT eventstream component."""
     mqtt = loader.get_component('mqtt')
-    pub_topic = config[DOMAIN].get('publish_topic', None)
-    sub_topic = config[DOMAIN].get('subscribe_topic', None)
+    conf = config.get(DOMAIN, {})
+    pub_topic = conf.get(CONF_PUBLISH_TOPIC)
+    sub_topic = conf.get(CONF_SUBSCRIBE_TOPIC)
 
     def _event_publisher(event):
-        """ Handle events by publishing them on the mqtt queue. """
+        """Handle events by publishing them on the MQTT queue."""
         if event.origin != EventOrigin.local:
             return
         if event.event_type == EVENT_TIME_CHANGED:
+            return
+
+        # MQTT fires a bus event for every incoming message, also messages from
+        # eventstream. Disable publishing these messages to other HA instances
+        # and possibly creating an infinite loop if these instances publish
+        # back to this one.
+        if all([not conf.get(CONF_PUBLISH_EVENTSTREAM_RECEIVED),
+                event.event_type == EVENT_MQTT_MESSAGE_RECEIVED,
+                event.data.get('topic') == sub_topic]):
             return
 
         # Filter out the events that were triggered by publishing
         # to the MQTT topic, or you will end up in an infinite loop.
         if event.event_type == EVENT_CALL_SERVICE:
             if (
-                    event.data.get('domain') == MQTT_DOMAIN and
-                    event.data.get('service') == MQTT_SVC_PUBLISH and
-                    event.data.get('topic') == pub_topic
+                    event.data.get('domain') == mqtt.DOMAIN and
+                    event.data.get('service') == mqtt.SERVICE_PUBLISH and
+                    event.data[ATTR_SERVICE_DATA].get('topic') == pub_topic
             ):
                 return
 
@@ -74,16 +83,13 @@ def setup(hass, config):
         msg = json.dumps(event_info, cls=JSONEncoder)
         mqtt.publish(hass, pub_topic, msg)
 
-    # Only listen for local events if you are going to publish them
+    # Only listen for local events if you are going to publish them.
     if pub_topic:
         hass.bus.listen(MATCH_ALL, _event_publisher)
 
-    # Process events from a remote server that are received on a queue
+    # Process events from a remote server that are received on a queue.
     def _event_receiver(topic, payload, qos):
-        """
-        Receive events published by the other HA instance and fire
-        them on this hass instance.
-        """
+        """Receive events published by and fire them on this hass instance."""
         event = json.loads(payload)
         event_type = event.get('event_type')
         event_data = event.get('event_data')
@@ -105,10 +111,10 @@ def setup(hass, config):
             origin=EventOrigin.remote
         )
 
-    # Only subscribe if you specified a topic
+    # Only subscribe if you specified a topic.
     if sub_topic:
         mqtt.subscribe(hass, sub_topic, _event_receiver)
 
     hass.states.set('{domain}.initialized'.format(domain=DOMAIN), True)
-    # return boolean to indicate that initialization was successful
+
     return True

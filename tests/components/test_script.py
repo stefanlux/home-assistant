@@ -1,234 +1,174 @@
-"""
-tests.components.test_script
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Tests script component.
-"""
-# pylint: disable=too-many-public-methods,protected-access
-from datetime import timedelta
+"""The tests for the Script component."""
+# pylint: disable=protected-access
 import unittest
 
+from homeassistant.core import callback
+from homeassistant.bootstrap import setup_component
 from homeassistant.components import script
-import homeassistant.util.dt as dt_util
 
-from tests.common import fire_time_changed, get_test_home_assistant
+from tests.common import get_test_home_assistant
 
 
 ENTITY_ID = 'script.test'
 
 
-class TestScript(unittest.TestCase):
-    """ Test the switch module. """
+class TestScriptComponent(unittest.TestCase):
+    """Test the Script component."""
 
-    def setUp(self):  # pylint: disable=invalid-name
+    # pylint: disable=invalid-name
+    def setUp(self):
+        """Setup things to be run when tests are started."""
         self.hass = get_test_home_assistant()
+        self.hass.config.components.append('group')
 
-    def tearDown(self):  # pylint: disable=invalid-name
-        """ Stop down stuff we started. """
+    # pylint: disable=invalid-name
+    def tearDown(self):
+        """Stop down everything that was started."""
         self.hass.stop()
 
-    def test_setup_with_missing_sequence(self):
-        self.assertTrue(script.setup(self.hass, {
-            'script': {
-                'test': {}
-            }
-        }))
-
-        self.assertEqual(0, len(self.hass.states.entity_ids('script')))
-
-    def test_setup_with_invalid_object_id(self):
-        self.assertTrue(script.setup(self.hass, {
-            'script': {
+    def test_setup_with_invalid_configs(self):
+        """Test setup with invalid configs."""
+        for value in (
+            {'test': {}},
+            {
                 'test hello world': {
-                    'sequence': []
+                    'sequence': [{'event': 'bla'}]
+                }
+            },
+            {
+                'test': {
+                    'sequence': {
+                        'event': 'test_event',
+                        'service': 'homeassistant.turn_on',
+                    }
+                }
+            },
+        ):
+            assert not setup_component(self.hass, 'script', {
+                'script': value
+            }), 'Script loaded with wrong config {}'.format(value)
+
+            self.assertEqual(0, len(self.hass.states.entity_ids('script')))
+
+    def test_turn_on_service(self):
+        """Verify that the turn_on service."""
+        event = 'test_event'
+        events = []
+
+        @callback
+        def record_event(event):
+            """Add recorded event to set."""
+            events.append(event)
+
+        self.hass.bus.listen(event, record_event)
+
+        assert setup_component(self.hass, 'script', {
+            'script': {
+                'test': {
+                    'sequence': [{
+                        'delay': {
+                            'seconds': 5
+                        }
+                    }, {
+                        'event': event,
+                    }]
                 }
             }
-        }))
+        })
 
-        self.assertEqual(0, len(self.hass.states.entity_ids('script')))
+        script.turn_on(self.hass, ENTITY_ID)
+        self.hass.block_till_done()
+        self.assertTrue(script.is_on(self.hass, ENTITY_ID))
+        self.assertEqual(0, len(events))
 
-    def test_setup_with_dict_as_sequence(self):
-        self.assertTrue(script.setup(self.hass, {
+        # Calling turn_on a second time should not advance the script
+        script.turn_on(self.hass, ENTITY_ID)
+        self.hass.block_till_done()
+        self.assertEqual(0, len(events))
+
+        script.turn_off(self.hass, ENTITY_ID)
+        self.hass.block_till_done()
+        self.assertFalse(script.is_on(self.hass, ENTITY_ID))
+        self.assertEqual(0, len(events))
+
+        state = self.hass.states.get('group.all_scripts')
+        assert state is not None
+        assert state.attributes.get('entity_id') == (ENTITY_ID,)
+
+    def test_toggle_service(self):
+        """Test the toggling of a service."""
+        event = 'test_event'
+        events = []
+
+        @callback
+        def record_event(event):
+            """Add recorded event to set."""
+            events.append(event)
+
+        self.hass.bus.listen(event, record_event)
+
+        assert setup_component(self.hass, 'script', {
+            'script': {
+                'test': {
+                    'sequence': [{
+                        'delay': {
+                            'seconds': 5
+                        }
+                    }, {
+                        'event': event,
+                    }]
+                }
+            }
+        })
+
+        script.toggle(self.hass, ENTITY_ID)
+        self.hass.block_till_done()
+        self.assertTrue(script.is_on(self.hass, ENTITY_ID))
+        self.assertEqual(0, len(events))
+
+        script.toggle(self.hass, ENTITY_ID)
+        self.hass.block_till_done()
+        self.assertFalse(script.is_on(self.hass, ENTITY_ID))
+        self.assertEqual(0, len(events))
+
+    def test_passing_variables(self):
+        """Test different ways of passing in variables."""
+        calls = []
+
+        @callback
+        def record_call(service):
+            """Add recorded event to set."""
+            calls.append(service)
+
+        self.hass.services.register('test', 'script', record_call)
+
+        assert setup_component(self.hass, 'script', {
             'script': {
                 'test': {
                     'sequence': {
-                        'event': 'test_event'
-                    }
-                }
-            }
-        }))
-
-        self.assertEqual(0, len(self.hass.states.entity_ids('script')))
-
-    def test_firing_event(self):
-        event = 'test_event'
-        calls = []
-
-        def record_event(event):
-            calls.append(event)
-
-        self.hass.bus.listen(event, record_event)
-
-        self.assertTrue(script.setup(self.hass, {
-            'script': {
-                'test': {
-                    'alias': 'Test Script',
-                    'sequence': [{
-                        'event': event,
-                        'event_data': {
-                            'hello': 'world'
-                        }
-                    }]
-                }
-            }
-        }))
-
-        script.turn_on(self.hass, ENTITY_ID)
-        self.hass.pool.block_till_done()
-
-        self.assertEqual(1, len(calls))
-        self.assertEqual('world', calls[0].data.get('hello'))
-        self.assertEqual(
-            True, self.hass.states.get(ENTITY_ID).attributes.get('can_cancel'))
-
-    def test_calling_service_old(self):
-        calls = []
-
-        def record_call(service):
-            calls.append(service)
-
-        self.hass.services.register('test', 'script', record_call)
-
-        self.assertTrue(script.setup(self.hass, {
-            'script': {
-                'test': {
-                    'sequence': [{
-                        'execute_service': 'test.script',
-                        'service_data': {
-                            'hello': 'world'
-                        }
-                    }]
-                }
-            }
-        }))
-
-        script.turn_on(self.hass, ENTITY_ID)
-        self.hass.pool.block_till_done()
-
-        self.assertEqual(1, len(calls))
-        self.assertEqual('world', calls[0].data.get('hello'))
-
-    def test_calling_service(self):
-        calls = []
-
-        def record_call(service):
-            calls.append(service)
-
-        self.hass.services.register('test', 'script', record_call)
-
-        self.assertTrue(script.setup(self.hass, {
-            'script': {
-                'test': {
-                    'sequence': [{
                         'service': 'test.script',
-                        'service_data': {
-                            'hello': 'world'
-                        }
-                    }]
-                }
-            }
-        }))
+                        'data_template': {
+                            'hello': '{{ greeting }}',
+                        },
+                    },
+                },
+            },
+        })
 
-        script.turn_on(self.hass, ENTITY_ID)
-        self.hass.pool.block_till_done()
+        script.turn_on(self.hass, ENTITY_ID, {
+            'greeting': 'world'
+        })
 
-        self.assertEqual(1, len(calls))
-        self.assertEqual('world', calls[0].data.get('hello'))
+        self.hass.block_till_done()
 
-    def test_delay(self):
-        event = 'test_event'
-        calls = []
+        assert len(calls) == 1
+        assert calls[-1].data['hello'] == 'world'
 
-        def record_event(event):
-            calls.append(event)
+        self.hass.services.call('script', 'test', {
+            'greeting': 'universe',
+        })
 
-        self.hass.bus.listen(event, record_event)
+        self.hass.block_till_done()
 
-        self.assertTrue(script.setup(self.hass, {
-            'script': {
-                'test': {
-                    'sequence': [{
-                        'event': event
-                    }, {
-                        'delay': {
-                            'seconds': 5
-                        }
-                    }, {
-                        'event': event,
-                    }]
-                }
-            }
-        }))
-
-        script.turn_on(self.hass, ENTITY_ID)
-        self.hass.pool.block_till_done()
-
-        self.assertTrue(script.is_on(self.hass, ENTITY_ID))
-        self.assertEqual(
-            False,
-            self.hass.states.get(ENTITY_ID).attributes.get('can_cancel'))
-
-        self.assertEqual(
-            event,
-            self.hass.states.get(ENTITY_ID).attributes.get('last_action'))
-        self.assertEqual(1, len(calls))
-
-        future = dt_util.utcnow() + timedelta(seconds=5)
-        fire_time_changed(self.hass, future)
-        self.hass.pool.block_till_done()
-
-        self.assertFalse(script.is_on(self.hass, ENTITY_ID))
-
-        self.assertEqual(2, len(calls))
-
-    def test_cancel_while_delay(self):
-        event = 'test_event'
-        calls = []
-
-        def record_event(event):
-            calls.append(event)
-
-        self.hass.bus.listen(event, record_event)
-
-        self.assertTrue(script.setup(self.hass, {
-            'script': {
-                'test': {
-                    'sequence': [{
-                        'delay': {
-                            'seconds': 5
-                        }
-                    }, {
-                        'event': event,
-                    }]
-                }
-            }
-        }))
-
-        script.turn_on(self.hass, ENTITY_ID)
-        self.hass.pool.block_till_done()
-
-        self.assertTrue(script.is_on(self.hass, ENTITY_ID))
-
-        self.assertEqual(0, len(calls))
-
-        script.turn_off(self.hass, ENTITY_ID)
-        self.hass.pool.block_till_done()
-        self.assertFalse(script.is_on(self.hass, ENTITY_ID))
-
-        future = dt_util.utcnow() + timedelta(seconds=5)
-        fire_time_changed(self.hass, future)
-        self.hass.pool.block_till_done()
-
-        self.assertFalse(script.is_on(self.hass, ENTITY_ID))
-
-        self.assertEqual(0, len(calls))
+        assert len(calls) == 2
+        assert calls[-1].data['hello'] == 'universe'

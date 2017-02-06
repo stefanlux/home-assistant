@@ -1,6 +1,4 @@
 """
-homeassistant.components.light.vera
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Support for Vera lights.
 
 For more details about this platform, please refer to the documentation at
@@ -8,82 +6,66 @@ https://home-assistant.io/components/light.vera/
 """
 import logging
 
-from requests.exceptions import RequestException
-from homeassistant.components.switch.vera import VeraSwitch
-
-from homeassistant.components.light import ATTR_BRIGHTNESS
-
-from homeassistant.const import EVENT_HOMEASSISTANT_STOP, STATE_ON
-
-REQUIREMENTS = ['pyvera==0.2.7']
+from homeassistant.components.light import (
+    ATTR_BRIGHTNESS, SUPPORT_BRIGHTNESS, Light)
+from homeassistant.const import (STATE_OFF, STATE_ON)
+from homeassistant.components.vera import (
+    VeraDevice, VERA_DEVICES, VERA_CONTROLLER)
 
 _LOGGER = logging.getLogger(__name__)
 
+DEPENDENCIES = ['vera']
+
+SUPPORT_VERA = SUPPORT_BRIGHTNESS
+
 
 # pylint: disable=unused-argument
-def setup_platform(hass, config, add_devices_callback, discovery_info=None):
-    """ Find and return Vera lights. """
-    import pyvera as veraApi
-
-    base_url = config.get('vera_controller_url')
-    if not base_url:
-        _LOGGER.error(
-            "The required parameter 'vera_controller_url'"
-            " was not found in config"
-        )
-        return False
-
-    device_data = config.get('device_data', {})
-
-    vera_controller, created = veraApi.init_controller(base_url)
-
-    if created:
-        def stop_subscription(event):
-            """ Shutdown Vera subscriptions and subscription thread on exit"""
-            _LOGGER.info("Shutting down subscriptions.")
-            vera_controller.stop()
-
-        hass.bus.listen_once(EVENT_HOMEASSISTANT_STOP, stop_subscription)
-
-    devices = []
-    try:
-        devices = vera_controller.get_devices([
-            'Switch',
-            'On/Off Switch',
-            'Dimmable Switch'])
-    except RequestException:
-        # There was a network related error connecting to the vera controller
-        _LOGGER.exception("Error communicating with Vera API")
-        return False
-
-    lights = []
-    for device in devices:
-        extra_data = device_data.get(device.device_id, {})
-        exclude = extra_data.get('exclude', False)
-
-        if exclude is not True:
-            lights.append(VeraLight(device, vera_controller, extra_data))
-
-    add_devices_callback(lights)
+def setup_platform(hass, config, add_devices, discovery_info=None):
+    """Setup Vera lights."""
+    add_devices(
+        VeraLight(device, VERA_CONTROLLER) for device in VERA_DEVICES['light'])
 
 
-class VeraLight(VeraSwitch):
-    """ Represents a Vera Light, including dimmable. """
+class VeraLight(VeraDevice, Light):
+    """Representation of a Vera Light, including dimmable."""
+
+    def __init__(self, vera_device, controller):
+        """Initialize the light."""
+        self._state = False
+        VeraDevice.__init__(self, vera_device, controller)
 
     @property
-    def state_attributes(self):
-        attr = super().state_attributes or {}
-
+    def brightness(self):
+        """Return the brightness of the light."""
         if self.vera_device.is_dimmable:
-            attr[ATTR_BRIGHTNESS] = self.vera_device.get_brightness()
+            return self.vera_device.get_brightness()
 
-        return attr
+    @property
+    def supported_features(self):
+        """Flag supported features."""
+        return SUPPORT_VERA
 
     def turn_on(self, **kwargs):
+        """Turn the light on."""
         if ATTR_BRIGHTNESS in kwargs and self.vera_device.is_dimmable:
             self.vera_device.set_brightness(kwargs[ATTR_BRIGHTNESS])
         else:
             self.vera_device.switch_on()
 
         self._state = STATE_ON
-        self.update_ha_state(True)
+        self.schedule_update_ha_state(True)
+
+    def turn_off(self, **kwargs):
+        """Turn the light off."""
+        self.vera_device.switch_off()
+        self._state = STATE_OFF
+        self.schedule_update_ha_state()
+
+    @property
+    def is_on(self):
+        """Return true if device is on."""
+        return self._state
+
+    def update(self):
+        """Called by the vera device callback to update state."""
+        self._state = self.vera_device.is_switched_on()

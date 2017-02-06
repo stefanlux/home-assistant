@@ -1,6 +1,4 @@
 """
-homeassistant.components.discovery
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Starts a service to scan in intervals for new devices.
 
 Will emit EVENT_PLATFORM_DISCOVERED whenever a new service has been discovered.
@@ -11,54 +9,45 @@ loaded before the EVENT_PLATFORM_DISCOVERED is fired.
 import logging
 import threading
 
-from homeassistant import bootstrap
-from homeassistant.const import (
-    EVENT_HOMEASSISTANT_START, EVENT_PLATFORM_DISCOVERED,
-    ATTR_SERVICE, ATTR_DISCOVERED)
+import voluptuous as vol
 
-DOMAIN = "discovery"
-REQUIREMENTS = ['netdisco==0.5.2']
+from homeassistant.const import EVENT_HOMEASSISTANT_START
+from homeassistant.helpers.discovery import load_platform, discover
+
+REQUIREMENTS = ['netdisco==0.8.1']
+
+DOMAIN = 'discovery'
 
 SCAN_INTERVAL = 300  # seconds
-
-SERVICE_WEMO = 'belkin_wemo'
-SERVICE_HUE = 'philips_hue'
-SERVICE_CAST = 'google_cast'
 SERVICE_NETGEAR = 'netgear_router'
-SERVICE_SONOS = 'sonos'
-SERVICE_PLEX = 'plex_mediaserver'
+SERVICE_WEMO = 'belkin_wemo'
+SERVICE_HASS_IOS_APP = 'hass_ios'
 
 SERVICE_HANDLERS = {
-    SERVICE_WEMO: "switch",
-    SERVICE_CAST: "media_player",
-    SERVICE_HUE: "light",
-    SERVICE_NETGEAR: 'device_tracker',
-    SERVICE_SONOS: 'media_player',
-    SERVICE_PLEX: 'media_player',
+    SERVICE_HASS_IOS_APP: ('ios', None),
+    SERVICE_NETGEAR: ('device_tracker', None),
+    SERVICE_WEMO: ('wemo', None),
+    'philips_hue': ('light', 'hue'),
+    'google_cast': ('media_player', 'cast'),
+    'panasonic_viera': ('media_player', 'panasonic_viera'),
+    'plex_mediaserver': ('media_player', 'plex'),
+    'roku': ('media_player', 'roku'),
+    'sonos': ('media_player', 'sonos'),
+    'yamaha': ('media_player', 'yamaha'),
+    'logitech_mediaserver': ('media_player', 'squeezebox'),
+    'directv': ('media_player', 'directv'),
+    'denonavr': ('media_player', 'denonavr'),
+    'samsung_tv': ('media_player', 'samsungtv'),
+    'yeelight': ('light', 'yeelight'),
 }
 
-
-def listen(hass, service, callback):
-    """
-    Setup listener for discovery of specific service.
-    Service can be a string or a list/tuple.
-    """
-
-    if isinstance(service, str):
-        service = (service,)
-    else:
-        service = tuple(service)
-
-    def discovery_event_listener(event):
-        """ Listens for discovery events. """
-        if event.data[ATTR_SERVICE] in service:
-            callback(event.data[ATTR_SERVICE], event.data[ATTR_DISCOVERED])
-
-    hass.bus.listen(EVENT_PLATFORM_DISCOVERED, discovery_event_listener)
+CONFIG_SCHEMA = vol.Schema({
+    DOMAIN: vol.Schema({}),
+}, extra=vol.ALLOW_EXTRA)
 
 
 def setup(hass, config):
-    """ Starts a discovery service. """
+    """Start a discovery service."""
     logger = logging.getLogger(__name__)
 
     from netdisco.service import DiscoveryService
@@ -69,28 +58,26 @@ def setup(hass, config):
     lock = threading.Lock()
 
     def new_service_listener(service, info):
-        """ Called when a new service is found. """
+        """Called when a new service is found."""
         with lock:
             logger.info("Found new service: %s %s", service, info)
 
-            component = SERVICE_HANDLERS.get(service)
+            comp_plat = SERVICE_HANDLERS.get(service)
 
-            # We do not know how to handle this service
-            if not component:
+            # We do not know how to handle this service.
+            if not comp_plat:
                 return
 
-            # This component cannot be setup.
-            if not bootstrap.setup_component(hass, component, config):
-                return
+            component, platform = comp_plat
 
-            hass.bus.fire(EVENT_PLATFORM_DISCOVERED, {
-                ATTR_SERVICE: service,
-                ATTR_DISCOVERED: info
-            })
+            if platform is None:
+                discover(hass, service, info, component, config)
+            else:
+                load_platform(hass, component, platform, info, config)
 
     # pylint: disable=unused-argument
     def start_discovery(event):
-        """ Start discovering. """
+        """Start discovering."""
         netdisco = DiscoveryService(SCAN_INTERVAL)
         netdisco.add_listener(new_service_listener)
         netdisco.start()

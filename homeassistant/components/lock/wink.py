@@ -1,66 +1,42 @@
 """
-homeassistant.components.lock.wink
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Support for Wink locks.
 
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/lock.wink/
 """
-import logging
 
 from homeassistant.components.lock import LockDevice
-from homeassistant.const import CONF_ACCESS_TOKEN
+from homeassistant.components.wink import WinkDevice, DOMAIN
 
-REQUIREMENTS = ['python-wink==0.4.1']
+DEPENDENCIES = ['wink']
 
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """ Sets up the Wink platform. """
+    """Setup the Wink platform."""
     import pywink
 
-    if discovery_info is None:
-        token = config.get(CONF_ACCESS_TOKEN)
-
-        if token is None:
-            logging.getLogger(__name__).error(
-                "Missing wink access_token. "
-                "Get one at https://winkbearertoken.appspot.com/")
-            return
-
-        pywink.set_bearer_token(token)
-
-    add_devices(WinkLockDevice(lock) for lock in pywink.get_locks())
+    for lock in pywink.get_locks():
+        _id = lock.object_id + lock.name()
+        if _id not in hass.data[DOMAIN]['unique_ids']:
+            add_devices([WinkLockDevice(lock, hass)])
 
 
-class WinkLockDevice(LockDevice):
-    """ Represents a Wink lock. """
+class WinkLockDevice(WinkDevice, LockDevice):
+    """Representation of a Wink lock."""
 
-    def __init__(self, wink):
-        self.wink = wink
-
-    @property
-    def unique_id(self):
-        """ Returns the id of this wink lock """
-        return "{}.{}".format(self.__class__, self.wink.device_id())
-
-    @property
-    def name(self):
-        """ Returns the name of the lock if any. """
-        return self.wink.name()
-
-    def update(self):
-        """ Update the state of the lock. """
-        self.wink.update_state()
+    def __init__(self, wink, hass):
+        """Initialize the lock."""
+        super().__init__(wink, hass)
 
     @property
     def is_locked(self):
-        """ True if device is locked. """
+        """Return true if device is locked."""
         return self.wink.state()
 
-    def lock(self):
-        """ Lock the device. """
+    def lock(self, **kwargs):
+        """Lock the device."""
         self.wink.set_state(True)
 
-    def unlock(self):
-        """ Unlock the device. """
+    def unlock(self, **kwargs):
+        """Unlock the device."""
         self.wink.set_state(False)

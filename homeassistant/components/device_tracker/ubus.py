@@ -1,62 +1,52 @@
 """
-homeassistant.components.device_tracker.ubus
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Device tracker platform that supports scanning a OpenWRT router for device
-presence.
+Support for OpenWRT (ubus) routers.
 
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/device_tracker.ubus/
 """
-import logging
 import json
-from datetime import timedelta
+import logging
 import re
 import threading
+from datetime import timedelta
+
 import requests
+import voluptuous as vol
 
-from homeassistant.const import CONF_HOST, CONF_USERNAME, CONF_PASSWORD
-from homeassistant.helpers import validate_config
+import homeassistant.helpers.config_validation as cv
+from homeassistant.components.device_tracker import (
+    DOMAIN, PLATFORM_SCHEMA, DeviceScanner)
+from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.util import Throttle
-from homeassistant.components.device_tracker import DOMAIN
 
-# Return cached results if last scan was less then this time ago
+# Return cached results if last scan was less then this time ago.
 MIN_TIME_BETWEEN_SCANS = timedelta(seconds=5)
 
 _LOGGER = logging.getLogger(__name__)
 
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
+    vol.Required(CONF_HOST): cv.string,
+    vol.Required(CONF_PASSWORD): cv.string,
+    vol.Required(CONF_USERNAME): cv.string
+})
+
 
 def get_scanner(hass, config):
-    """ Validates config and returns a Luci scanner. """
-    if not validate_config(config,
-                           {DOMAIN: [CONF_HOST, CONF_USERNAME, CONF_PASSWORD]},
-                           _LOGGER):
-        return None
-
+    """Validate the configuration and return an ubus scanner."""
     scanner = UbusDeviceScanner(config[DOMAIN])
 
     return scanner if scanner.success_init else None
 
 
-# pylint: disable=too-many-instance-attributes
-class UbusDeviceScanner(object):
+class UbusDeviceScanner(DeviceScanner):
     """
-    This class queries a wireless router running OpenWrt firmware
-    for connected devices. Adapted from Tomato scanner.
+    This class queries a wireless router running OpenWrt firmware.
 
-    Configure your routers' ubus ACL based on following instructions:
-
-    http://wiki.openwrt.org/doc/techref/ubus
-
-    Read only access will be fine.
-
-    To use this class you have to install rpcd-mod-file package
-    in your OpenWrt router:
-
-    opkg install rpcd-mod-file
-
+    Adapted from Tomato scanner.
     """
 
     def __init__(self, config):
+        """Initialize the scanner."""
         host = config[CONF_HOST]
         username, password = config[CONF_USERNAME], config[CONF_PASSWORD]
 
@@ -72,17 +62,12 @@ class UbusDeviceScanner(object):
         self.success_init = self.session_id is not None
 
     def scan_devices(self):
-        """
-        Scans for new devices and return a list containing found device ids.
-        """
-
+        """Scan for new devices and return a list with found device IDs."""
         self._update_info()
-
         return self.last_results
 
     def get_device_name(self, device):
-        """ Returns the name of the given device or None if we don't know. """
-
+        """Return the name of the given device or None if we don't know."""
         with self.lock:
             if self.leasefile is None:
                 result = _req_json_rpc(self.url, self.session_id,
@@ -111,8 +96,8 @@ class UbusDeviceScanner(object):
 
     @Throttle(MIN_TIME_BETWEEN_SCANS)
     def _update_info(self):
-        """
-        Ensures the information from the Luci router is up to date.
+        """Ensure the information from the Luci router is up to date.
+
         Returns boolean if scanning successful.
         """
         if not self.success_init:
@@ -140,8 +125,7 @@ class UbusDeviceScanner(object):
 
 
 def _req_json_rpc(url, session_id, rpcmethod, subsystem, method, **params):
-    """ Perform one JSON RPC operation. """
-
+    """Perform one JSON RPC operation."""
     data = json.dumps({"jsonrpc": "2.0",
                        "id": 1,
                        "method": rpcmethod,
@@ -166,7 +150,7 @@ def _req_json_rpc(url, session_id, rpcmethod, subsystem, method, **params):
 
 
 def _get_session_id(url, username, password):
-    """ Get authentication token for the given host+username+password. """
+    """Get the authentication token for the given host+username+password."""
     res = _req_json_rpc(url, "00000000000000000000000000000000", 'call',
                         'session', 'login', username=username,
                         password=password)

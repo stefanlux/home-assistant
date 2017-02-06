@@ -1,22 +1,23 @@
-# Run style checks
+#!/bin/sh
+# Execute lint to spot code mistakes.
 
 cd "$(dirname "$0")/.."
 
-echo "Checking style with flake8..."
-tput setaf 1
-flake8 --exclude www_static homeassistant
-FLAKE8_STATUS=$?
-tput sgr0
-
-echo "Checking style with pylint..."
-tput setaf 1
-pylint homeassistant
-PYLINT_STATUS=$?
-tput sgr0
-
-if [ $FLAKE8_STATUS -eq 0 ]
-then
-  exit $PYLINT_STATUS
+if [ "$1" = "--changed" ]; then
+  export files="`git diff upstream/dev --name-only | grep -e '\.py$'`"
+  echo "================================================="
+  echo "FILES CHANGED (git diff upstream/dev --name-only)"
+  echo "================================================="
+  echo  $files
+  echo "================"
+  echo "LINT with flake8"
+  echo "================"
+  flake8 --doctests $files
+  echo "================"
+  echo "LINT with pylint"
+  echo "================"
+  pylint $files
+  echo
 else
-  exit $FLAKE8_STATUS
+  tox -e lint
 fi

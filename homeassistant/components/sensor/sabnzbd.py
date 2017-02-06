@@ -1,20 +1,34 @@
 """
-homeassistant.components.sensor.sabnzbd
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Monitors SABnzbd NZB client API.
+Support for monitoring an SABnzbd NZB client.
 
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/sensor.sabnzbd/
 """
-from datetime import timedelta
 import logging
+from datetime import timedelta
 
+import voluptuous as vol
+
+from homeassistant.components.sensor import PLATFORM_SCHEMA
+from homeassistant.const import (
+    CONF_HOST, CONF_API_KEY, CONF_NAME, CONF_PORT, CONF_MONITORED_VARIABLES,
+    CONF_SSL)
 from homeassistant.helpers.entity import Entity
 from homeassistant.util import Throttle
+import homeassistant.helpers.config_validation as cv
 
 REQUIREMENTS = ['https://github.com/jamespcole/home-assistant-nzb-clients/'
                 'archive/616cad59154092599278661af17e2a9f2cf5e2a9.zip'
                 '#python-sabnzbd==0.1']
+
+_LOGGER = logging.getLogger(__name__)
+_THROTTLED_REFRESH = None
+
+DEFAULT_NAME = 'SABnzbd'
+DEFAULT_PORT = 8080
+DEFAULT_SSL = False
+
+MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=1)
 
 SENSOR_TYPES = {
     'current_status': ['Status', None],
@@ -25,52 +39,60 @@ SENSOR_TYPES = {
     'disk_free': ['Disk Free', 'GB'],
 }
 
-_LOGGER = logging.getLogger(__name__)
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
+    vol.Required(CONF_API_KEY): cv.string,
+    vol.Required(CONF_HOST): cv.string,
+    vol.Optional(CONF_MONITORED_VARIABLES, default=['current_status']):
+        vol.All(cv.ensure_list, [vol.In(SENSOR_TYPES)]),
+    vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
+    vol.Optional(CONF_PORT, default=DEFAULT_PORT): cv.port,
+    vol.Optional(CONF_SSL, default=DEFAULT_SSL): cv.boolean,
+})
 
-_THROTTLED_REFRESH = None
 
-
-# pylint: disable=unused-argument
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """ Sets up the SABnzbd sensors. """
+    """Setup the SABnzbd sensors."""
     from pysabnzbd import SabnzbdApi, SabnzbdApiException
 
-    api_key = config.get("api_key")
-    base_url = config.get("base_url")
-    name = config.get("name", "SABnzbd")
-    if not base_url:
-        _LOGGER.error('Missing config variable base_url')
-        return False
-    if not api_key:
-        _LOGGER.error('Missing config variable api_key')
-        return False
+    host = config.get(CONF_HOST)
+    port = config.get(CONF_PORT)
+    name = config.get(CONF_NAME)
+    api_key = config.get(CONF_API_KEY)
+    monitored_types = config.get(CONF_MONITORED_VARIABLES)
+    use_ssl = config.get(CONF_SSL)
+
+    if use_ssl:
+        uri_scheme = 'https://'
+    else:
+        uri_scheme = 'http://'
+
+    base_url = "{}{}:{}/".format(uri_scheme, host, port)
 
     sab_api = SabnzbdApi(base_url, api_key)
 
     try:
         sab_api.check_available()
     except SabnzbdApiException:
-        _LOGGER.exception("Connection to SABnzbd API failed.")
+        _LOGGER.error("Connection to SABnzbd API failed")
         return False
 
     # pylint: disable=global-statement
     global _THROTTLED_REFRESH
-    _THROTTLED_REFRESH = Throttle(timedelta(seconds=1))(sab_api.refresh_queue)
+    _THROTTLED_REFRESH = Throttle(
+        MIN_TIME_BETWEEN_UPDATES)(sab_api.refresh_queue)
 
-    dev = []
-    for variable in config['monitored_variables']:
-        if variable['type'] not in SENSOR_TYPES:
-            _LOGGER.error('Sensor type: "%s" does not exist', variable['type'])
-        else:
-            dev.append(SabnzbdSensor(variable['type'], sab_api, name))
+    devices = []
+    for variable in monitored_types:
+        devices.append(SabnzbdSensor(variable, sab_api, name))
 
-    add_devices(dev)
+    add_devices(devices)
 
 
 class SabnzbdSensor(Entity):
-    """ Represents an SABnzbd sensor. """
+    """Representation of an SABnzbd sensor."""
 
     def __init__(self, sensor_type, sabnzb_client, client_name):
+        """Initialize the sensor."""
         self._name = SENSOR_TYPES[sensor_type][0]
         self.sabnzb_client = sabnzb_client
         self.type = sensor_type
@@ -80,31 +102,33 @@ class SabnzbdSensor(Entity):
 
     @property
     def name(self):
-        return self.client_name + ' ' + self._name
+        """Return the name of the sensor."""
+        return '{} {}'.format(self.client_name, self._name)
 
     @property
     def state(self):
-        """ Returns the state of the device. """
+        """Return the state of the sensor."""
         return self._state
 
     @property
     def unit_of_measurement(self):
-        """ Unit of measurement of this entity, if any. """
+        """Return the unit of measurement of this entity, if any."""
         return self._unit_of_measurement
 
+    # pylint: disable=no-self-use
     def refresh_sabnzbd_data(self):
-        """ Calls the throttled SABnzbd refresh method. """
+        """Call the throttled SABnzbd refresh method."""
         if _THROTTLED_REFRESH is not None:
             from pysabnzbd import SabnzbdApiException
             try:
                 _THROTTLED_REFRESH()
             except SabnzbdApiException:
-                _LOGGER.exception(
-                    self.name + "  Connection to SABnzbd API failed."
-                )
+                _LOGGER.exception("Connection to SABnzbd API failed")
 
     def update(self):
+        """Get the latest data and updates the states."""
         self.refresh_sabnzbd_data()
+
         if self.sabnzb_client.queue:
             if self.type == 'current_status':
                 self._state = self.sabnzb_client.queue.get('status')

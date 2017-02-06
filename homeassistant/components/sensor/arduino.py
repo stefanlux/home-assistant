@@ -1,46 +1,61 @@
 """
-homeassistant.components.sensor.arduino
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Support for getting information from Arduino pins. Only analog pins are
-supported.
+Support for getting information from Arduino pins.
+
+Only analog pins are supported.
 
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/sensor.arduino/
 """
 import logging
 
-import homeassistant.components.arduino as arduino
-from homeassistant.helpers.entity import Entity
-from homeassistant.const import DEVICE_DEFAULT_NAME
+import voluptuous as vol
 
-DEPENDENCIES = ['arduino']
+from homeassistant.components.sensor import PLATFORM_SCHEMA
+import homeassistant.components.arduino as arduino
+from homeassistant.const import CONF_NAME
+from homeassistant.helpers.entity import Entity
+import homeassistant.helpers.config_validation as cv
+
 
 _LOGGER = logging.getLogger(__name__)
 
+CONF_PINS = 'pins'
+CONF_TYPE = 'analog'
+
+DEPENDENCIES = ['arduino']
+
+PIN_SCHEMA = vol.Schema({
+    vol.Required(CONF_NAME): cv.string,
+})
+
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
+    vol.Required(CONF_PINS):
+        vol.Schema({cv.positive_int: PIN_SCHEMA}),
+})
+
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """ Sets up the Arduino platform. """
-
+    """Set up the Arduino platform."""
     # Verify that the Arduino board is present
     if arduino.BOARD is None:
-        _LOGGER.error('A connection has not been made to the Arduino board.')
+        _LOGGER.error("A connection has not been made to the Arduino board")
         return False
 
+    pins = config.get(CONF_PINS)
+
     sensors = []
-    pins = config.get('pins')
     for pinnum, pin in pins.items():
-        if pin.get('name'):
-            sensors.append(ArduinoSensor(pin.get('name'),
-                                         pinnum,
-                                         'analog'))
+        sensors.append(ArduinoSensor(pin.get(CONF_NAME), pinnum, CONF_TYPE))
     add_devices(sensors)
 
 
 class ArduinoSensor(Entity):
-    """ Represents an Arduino Sensor. """
+    """Representation of an Arduino Sensor."""
+
     def __init__(self, name, pin, pin_type):
+        """Initialize the sensor."""
         self._pin = pin
-        self._name = name or DEVICE_DEFAULT_NAME
+        self._name = name
         self.pin_type = pin_type
         self.direction = 'in'
         self._value = None
@@ -49,14 +64,14 @@ class ArduinoSensor(Entity):
 
     @property
     def state(self):
-        """ Returns the state of the sensor. """
+        """Return the state of the sensor."""
         return self._value
 
     @property
     def name(self):
-        """ Get the name of the sensor. """
+        """Get the name of the sensor."""
         return self._name
 
     def update(self):
-        """ Get the latest value from the pin. """
+        """Get the latest value from the pin."""
         self._value = arduino.BOARD.get_analog_inputs()[self._pin][1]

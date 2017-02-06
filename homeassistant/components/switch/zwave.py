@@ -1,76 +1,53 @@
 """
-homeassistant.components.switch.zwave
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Z-Wave platform that handles simple binary switches.
 
-Zwave platform that handles simple binary switches.
+For more details about this platform, please refer to the documentation at
+https://home-assistant.io/components/switch.zwave/
 """
+import logging
 # Because we do not compile openzwave on CI
 # pylint: disable=import-error
-import homeassistant.components.zwave as zwave
+from homeassistant.components.switch import DOMAIN, SwitchDevice
+from homeassistant.components import zwave
 
-from homeassistant.components.switch import SwitchDevice
+_LOGGER = logging.getLogger(__name__)
 
 
 # pylint: disable=unused-argument
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """ Find and return demo switches. """
-    if discovery_info is None:
+    """Setup the Z-Wave platform."""
+    if discovery_info is None or zwave.NETWORK is None:
         return
 
-    node = zwave.NETWORK.nodes[discovery_info[zwave.ATTR_NODE_ID]]
-    value = node.values[discovery_info[zwave.ATTR_VALUE_ID]]
+    node = zwave.NETWORK.nodes[discovery_info[zwave.const.ATTR_NODE_ID]]
+    value = node.values[discovery_info[zwave.const.ATTR_VALUE_ID]]
 
-    if value.command_class != zwave.COMMAND_CLASS_SWITCH_BINARY:
+    if not node.has_command_class(zwave.const.COMMAND_CLASS_SWITCH_BINARY):
         return
-    if value.type != zwave.TYPE_BOOL:
-        return
-    if value.genre != zwave.GENRE_USER:
+    if value.type != zwave.const.TYPE_BOOL or value.genre != \
+       zwave.const.GENRE_USER:
         return
 
     value.set_change_verified(False)
     add_devices([ZwaveSwitch(value)])
 
 
-class ZwaveSwitch(SwitchDevice):
-    """ Provides a zwave switch. """
+class ZwaveSwitch(zwave.ZWaveDeviceEntity, SwitchDevice):
+    """Representation of a Z-Wave switch."""
+
     def __init__(self, value):
-        from openzwave.network import ZWaveNetwork
-        from pydispatch import dispatcher
-
-        self._value = value
-        self._node = value.node
-
-        self._state = value.data
-        dispatcher.connect(
-            self._value_changed, ZWaveNetwork.SIGNAL_VALUE_CHANGED)
-
-    def _value_changed(self, value):
-        """ Called when a value has changed on the network. """
-        if self._value.value_id == value.value_id:
-            self._state = value.data
-            self.update_ha_state()
-
-    @property
-    def should_poll(self):
-        """ No polling needed for a demo switch. """
-        return False
-
-    @property
-    def name(self):
-        """ Returns the name of the device if any. """
-        name = self._node.name or "{}".format(self._node.product_name)
-
-        return "{}".format(name or self._value.label)
+        """Initialize the Z-Wave switch device."""
+        zwave.ZWaveDeviceEntity.__init__(self, value, DOMAIN)
 
     @property
     def is_on(self):
-        """ True if device is on. """
-        return self._state
+        """Return true if device is on."""
+        return self._value.data
 
     def turn_on(self, **kwargs):
-        """ Turn the device on. """
-        self._node.set_switch(self._value.value_id, True)
+        """Turn the device on."""
+        self._value.node.set_switch(self._value.value_id, True)
 
     def turn_off(self, **kwargs):
-        """ Turn the device off. """
-        self._node.set_switch(self._value.value_id, False)
+        """Turn the device off."""
+        self._value.node.set_switch(self._value.value_id, False)

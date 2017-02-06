@@ -1,7 +1,5 @@
 """
-homeassistant.components.sensor.openweathermap
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-OpenWeatherMap (OWM) service.
+Support for the OpenWeatherMap (OWM) service.
 
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/sensor.openweathermap/
@@ -9,16 +7,32 @@ https://home-assistant.io/components/sensor.openweathermap/
 import logging
 from datetime import timedelta
 
-from homeassistant.util import Throttle
-from homeassistant.const import (CONF_API_KEY, TEMP_CELCIUS, TEMP_FAHRENHEIT)
-from homeassistant.helpers.entity import Entity
+import voluptuous as vol
 
-REQUIREMENTS = ['pyowm==2.3.0']
+from homeassistant.components.sensor import PLATFORM_SCHEMA
+from homeassistant.const import (
+    CONF_API_KEY, CONF_NAME, TEMP_CELSIUS, TEMP_FAHRENHEIT,
+    CONF_MONITORED_CONDITIONS, ATTR_ATTRIBUTION)
+import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.entity import Entity
+from homeassistant.util import Throttle
+
+REQUIREMENTS = ['pyowm==2.6.1']
+
 _LOGGER = logging.getLogger(__name__)
+
+CONF_ATTRIBUTION = "Data provided by OpenWeatherMap"
+CONF_FORECAST = 'forecast'
+
+DEFAULT_NAME = 'OWM'
+
+MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=120)
+
 SENSOR_TYPES = {
     'weather': ['Condition', None],
     'temperature': ['Temperature', None],
     'wind_speed': ['Wind speed', 'm/s'],
+    'wind_bearing': ['Wind bearing', '°'],
     'humidity': ['Humidity', '%'],
     'pressure': ['Pressure', 'mbar'],
     'clouds': ['Cloud coverage', '%'],
@@ -26,63 +40,55 @@ SENSOR_TYPES = {
     'snow': ['Snow', 'mm']
 }
 
-# Return cached results if last scan was less then this time ago
-MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=120)
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
+    vol.Required(CONF_API_KEY): cv.string,
+    vol.Optional(CONF_MONITORED_CONDITIONS, default=[]):
+        vol.All(cv.ensure_list, [vol.In(SENSOR_TYPES)]),
+    vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
+    vol.Optional(CONF_FORECAST, default=False): cv.boolean
+})
 
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """ Get the OpenWeatherMap sensor. """
-
+    """Setup the OpenWeatherMap sensor."""
     if None in (hass.config.latitude, hass.config.longitude):
         _LOGGER.error("Latitude or longitude not set in Home Assistant config")
         return False
 
-    try:
-        from pyowm import OWM
+    from pyowm import OWM
 
-    except ImportError:
-        _LOGGER.exception(
-            "Unable to import pyowm. "
-            "Did you maybe not install the 'PyOWM' package?")
+    SENSOR_TYPES['temperature'][1] = hass.config.units.temperature_unit
 
-        return False
+    name = config.get(CONF_NAME)
+    forecast = config.get(CONF_FORECAST)
 
-    SENSOR_TYPES['temperature'][1] = hass.config.temperature_unit
-    unit = hass.config.temperature_unit
-    forecast = config.get('forecast', 0)
-    owm = OWM(config.get(CONF_API_KEY, None))
+    owm = OWM(config.get(CONF_API_KEY))
 
     if not owm:
-        _LOGGER.error(
-            "Connection error "
-            "Please check your settings for OpenWeatherMap.")
+        _LOGGER.error("Unable to connect to OpenWeatherMap")
         return False
 
     data = WeatherData(owm, forecast, hass.config.latitude,
                        hass.config.longitude)
     dev = []
-    try:
-        for variable in config['monitored_conditions']:
-            if variable not in SENSOR_TYPES:
-                _LOGGER.error('Sensor type: "%s" does not exist', variable)
-            else:
-                dev.append(OpenWeatherMapSensor(data, variable, unit))
-    except KeyError:
-        pass
+    for variable in config[CONF_MONITORED_CONDITIONS]:
+        dev.append(OpenWeatherMapSensor(
+            name, data, variable, SENSOR_TYPES[variable][1]))
 
-    if forecast == 1:
+    if forecast:
         SENSOR_TYPES['forecast'] = ['Forecast', None]
-        dev.append(OpenWeatherMapSensor(data, 'forecast', unit))
+        dev.append(OpenWeatherMapSensor(
+            name, data, 'forecast', SENSOR_TYPES['temperature'][1]))
 
     add_devices(dev)
 
 
-# pylint: disable=too-few-public-methods
 class OpenWeatherMapSensor(Entity):
-    """ Implements an OpenWeatherMap sensor. """
+    """Implementation of an OpenWeatherMap sensor."""
 
-    def __init__(self, weather_data, sensor_type, temp_unit):
-        self.client_name = 'Weather'
+    def __init__(self, name, weather_data, sensor_type, temp_unit):
+        """Initialize the sensor."""
+        self.client_name = name
         self._name = SENSOR_TYPES[sensor_type][0]
         self.owa_client = weather_data
         self.temp_unit = temp_unit
@@ -93,22 +99,28 @@ class OpenWeatherMapSensor(Entity):
 
     @property
     def name(self):
+        """Return the name of the sensor."""
         return '{} {}'.format(self.client_name, self._name)
 
     @property
     def state(self):
-        """ Returns the state of the device. """
+        """Return the state of the device."""
         return self._state
 
     @property
     def unit_of_measurement(self):
-        """ Unit of measurement of this entity, if any. """
+        """Return the unit of measurement of this entity, if any."""
         return self._unit_of_measurement
 
-    # pylint: disable=too-many-branches
-    def update(self):
-        """ Gets the latest data from OWM and updates the states. """
+    @property
+    def device_state_attributes(self):
+        """Return the state attributes."""
+        return {
+            ATTR_ATTRIBUTION: CONF_ATTRIBUTION,
+        }
 
+    def update(self):
+        """Get the latest data from OWM and updates the states."""
         self.owa_client.update()
         data = self.owa_client.data
         fc_data = self.owa_client.fc_data
@@ -116,18 +128,19 @@ class OpenWeatherMapSensor(Entity):
         if self.type == 'weather':
             self._state = data.get_detailed_status()
         elif self.type == 'temperature':
-            if self.temp_unit == TEMP_CELCIUS:
-                self._state = round(data.get_temperature('celsius')['temp'],
-                                    1)
+            if self.temp_unit == TEMP_CELSIUS:
+                self._state = round(data.get_temperature('celsius')['temp'], 1)
             elif self.temp_unit == TEMP_FAHRENHEIT:
                 self._state = round(data.get_temperature('fahrenheit')['temp'],
                                     1)
             else:
                 self._state = round(data.get_temperature()['temp'], 1)
         elif self.type == 'wind_speed':
-            self._state = data.get_wind()['speed']
+            self._state = round(data.get_wind()['speed'], 1)
+        elif self.type == 'wind_bearing':
+            self._state = round(data.get_wind()['deg'], 1)
         elif self.type == 'humidity':
-            self._state = data.get_humidity()
+            self._state = round(data.get_humidity(), 1)
         elif self.type == 'pressure':
             self._state = round(data.get_pressure()['press'], 0)
         elif self.type == 'clouds':
@@ -151,9 +164,10 @@ class OpenWeatherMapSensor(Entity):
 
 
 class WeatherData(object):
-    """ Gets the latest data from OpenWeatherMap. """
+    """Get the latest data from OpenWeatherMap."""
 
     def __init__(self, owm, forecast, latitude, longitude):
+        """Initialize the data object."""
         self.owm = owm
         self.forecast = forecast
         self.latitude = latitude
@@ -163,15 +177,15 @@ class WeatherData(object):
 
     @Throttle(MIN_TIME_BETWEEN_UPDATES)
     def update(self):
-        """ Gets the latest data from OpenWeatherMap. """
+        """Get the latest data from OpenWeatherMap."""
         obs = self.owm.weather_at_coords(self.latitude, self.longitude)
         if obs is None:
-            _LOGGER.warning('Failed to fetch data from OWM')
+            _LOGGER.warning("Failed to fetch data from OpenWeatherMap")
             return
 
         self.data = obs.get_weather()
 
         if self.forecast == 1:
-            obs = self.owm.three_hours_forecast_at_coords(self.latitude,
-                                                          self.longitude)
+            obs = self.owm.three_hours_forecast_at_coords(
+                self.latitude, self.longitude)
             self.fc_data = obs.get_forecast()

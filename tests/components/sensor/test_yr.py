@@ -1,79 +1,71 @@
-"""
-tests.components.sensor.test_yr
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Tests Yr sensor.
-"""
+"""The tests for the Yr sensor platform."""
+import asyncio
 from datetime import datetime
 from unittest.mock import patch
 
-import pytest
-
-import homeassistant.core as ha
-import homeassistant.components.sensor as sensor
+from homeassistant.bootstrap import async_setup_component
 import homeassistant.util.dt as dt_util
+from tests.common import assert_setup_component, load_fixture
 
 
-@pytest.mark.usefixtures('betamax_session')
-class TestSensorYr:
-    """ Test the Yr sensor. """
+NOW = datetime(2016, 6, 9, 1, tzinfo=dt_util.UTC)
 
-    def setup_method(self, method):
-        self.hass = ha.HomeAssistant()
-        self.hass.config.latitude = 32.87336
-        self.hass.config.longitude = 117.22743
 
-    def teardown_method(self, method):
-        """ Stop down stuff we started. """
-        self.hass.stop()
+@asyncio.coroutine
+def test_default_setup(hass, aioclient_mock):
+    """Test the default setup."""
+    aioclient_mock.get('https://aa015h6buqvih86i1.api.met.no/'
+                       'weatherapi/locationforecast/1.9/',
+                       text=load_fixture('yr.no.json'))
+    config = {'platform': 'yr',
+              'elevation': 0}
+    hass.allow_pool = True
+    with patch('homeassistant.components.sensor.yr.dt_util.utcnow',
+               return_value=NOW), assert_setup_component(1):
+        yield from async_setup_component(hass, 'sensor', {'sensor': config})
 
-    def test_default_setup(self, betamax_session):
-        now = datetime(2016, 1, 5, 1, tzinfo=dt_util.UTC)
+    state = hass.states.get('sensor.yr_symbol')
 
-        with patch('homeassistant.components.sensor.yr.requests.Session',
-                   return_value=betamax_session):
-            with patch('homeassistant.components.sensor.yr.dt_util.utcnow',
-                       return_value=now):
-                assert sensor.setup(self.hass, {
-                    'sensor': {
-                        'platform': 'yr',
-                        'elevation': 0,
-                    }
-                })
+    assert state.state == '3'
+    assert state.attributes.get('unit_of_measurement') is None
 
-        state = self.hass.states.get('sensor.yr_symbol')
 
-        assert state.state.isnumeric()
-        assert state.attributes.get('unit_of_measurement') is None
+@asyncio.coroutine
+def test_custom_setup(hass, aioclient_mock):
+    """Test a custom setup."""
+    aioclient_mock.get('https://aa015h6buqvih86i1.api.met.no/'
+                       'weatherapi/locationforecast/1.9/',
+                       text=load_fixture('yr.no.json'))
 
-    def test_custom_setup(self, betamax_session):
-        with patch('homeassistant.components.sensor.yr.requests.Session',
-                   return_value=betamax_session):
-            assert sensor.setup(self.hass, {
-                'sensor': {
-                    'platform': 'yr',
-                    'elevation': 0,
-                    'monitored_conditions': {
-                        'pressure',
-                        'windDirection',
-                        'humidity',
-                        'fog',
-                        'windSpeed'
-                    }
-                }
-            })
+    config = {'platform': 'yr',
+              'elevation': 0,
+              'monitored_conditions': [
+                  'pressure',
+                  'windDirection',
+                  'humidity',
+                  'fog',
+                  'windSpeed']}
+    hass.allow_pool = True
+    with patch('homeassistant.components.sensor.yr.dt_util.utcnow',
+               return_value=NOW), assert_setup_component(1):
+        yield from async_setup_component(hass, 'sensor', {'sensor': config})
 
-        state = self.hass.states.get('sensor.yr_pressure')
-        assert 'hPa', state.attributes.get('unit_of_measurement')
+    state = hass.states.get('sensor.yr_pressure')
+    assert state.attributes.get('unit_of_measurement') == 'hPa'
+    assert state.state == '1009.3'
 
-        state = self.hass.states.get('sensor.yr_wind_direction')
-        assert '°', state.attributes.get('unit_of_measurement')
+    state = hass.states.get('sensor.yr_wind_direction')
+    assert state.attributes.get('unit_of_measurement') == '°'
+    assert state.state == '103.6'
 
-        state = self.hass.states.get('sensor.yr_humidity')
-        assert '%', state.attributes.get('unit_of_measurement')
+    state = hass.states.get('sensor.yr_humidity')
+    assert state.attributes.get('unit_of_measurement') == '%'
+    assert state.state == '55.5'
 
-        state = self.hass.states.get('sensor.yr_fog')
-        assert '%', state.attributes.get('unit_of_measurement')
+    state = hass.states.get('sensor.yr_fog')
+    assert state.attributes.get('unit_of_measurement') == '%'
+    assert state.state == '0.0'
 
-        state = self.hass.states.get('sensor.yr_wind_speed')
-        assert 'm/s', state.attributes.get('unit_of_measurement')
+    state = hass.states.get('sensor.yr_wind_speed')
+    assert state.attributes.get('unit_of_measurement') == 'm/s'
+    assert state.state == '3.5'

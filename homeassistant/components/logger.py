@@ -1,6 +1,4 @@
 """
-homeassistant.components.logger
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Component that will help set the level of logging for components.
 
 For more details about this component, please refer to the documentation at
@@ -8,6 +6,10 @@ https://home-assistant.io/components/logger/
 """
 import logging
 from collections import OrderedDict
+
+import voluptuous as vol
+
+import homeassistant.helpers.config_validation as cv
 
 DOMAIN = 'logger'
 
@@ -25,18 +27,28 @@ LOGSEVERITY = {
 LOGGER_DEFAULT = 'default'
 LOGGER_LOGS = 'logs'
 
+_VALID_LOG_LEVEL = vol.All(vol.Upper, vol.In(LOGSEVERITY))
+
+CONFIG_SCHEMA = vol.Schema({
+    DOMAIN: vol.Schema({
+        vol.Optional(LOGGER_DEFAULT): _VALID_LOG_LEVEL,
+        vol.Optional(LOGGER_LOGS): vol.Schema({cv.string: _VALID_LOG_LEVEL}),
+    }),
+}, extra=vol.ALLOW_EXTRA)
+
 
 class HomeAssistantLogFilter(logging.Filter):
-    """ A log filter. """
-    # pylint: disable=no-init,too-few-public-methods
+    """A log filter."""
 
+    # pylint: disable=no-init
     def __init__(self, logfilter):
+        """Initialize the filter."""
         super().__init__()
 
         self.logfilter = logfilter
 
     def filter(self, record):
-
+        """A filter to use."""
         # Log with filtered severity
         if LOGGER_LOGS in self.logfilter:
             for filtername in self.logfilter[LOGGER_LOGS]:
@@ -50,21 +62,20 @@ class HomeAssistantLogFilter(logging.Filter):
 
 
 def setup(hass, config=None):
-    """ Setup the logger component. """
-
-    logfilter = dict()
+    """Setup the logger component."""
+    logfilter = {}
 
     # Set default log severity
     logfilter[LOGGER_DEFAULT] = LOGSEVERITY['DEBUG']
     if LOGGER_DEFAULT in config.get(DOMAIN):
         logfilter[LOGGER_DEFAULT] = LOGSEVERITY[
-            config.get(DOMAIN)[LOGGER_DEFAULT].upper()
+            config.get(DOMAIN)[LOGGER_DEFAULT]
         ]
 
     # Compute log severity for components
     if LOGGER_LOGS in config.get(DOMAIN):
         for key, value in config.get(DOMAIN)[LOGGER_LOGS].items():
-            config.get(DOMAIN)[LOGGER_LOGS][key] = LOGSEVERITY[value.upper()]
+            config.get(DOMAIN)[LOGGER_LOGS][key] = LOGSEVERITY[value]
 
         logs = OrderedDict(
             sorted(

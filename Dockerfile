@@ -1,25 +1,27 @@
-FROM python:3.4
+FROM python:3.5
 MAINTAINER Paulus Schoutsen <Paulus@PaulusSchoutsen.nl>
+
+# Uncomment any of the following lines to disable the installation.
+#ENV INSTALL_TELLSTICK no
+#ENV INSTALL_OPENALPR no
+#ENV INSTALL_FFMPEG no
+#ENV INSTALL_OPENZWAVE no
+#ENV INSTALL_LIBCEC no
+#ENV INSTALL_PHANTOMJS no
 
 VOLUME /config
 
 RUN mkdir -p /usr/src/app
 WORKDIR /usr/src/app
 
-# For the nmap tracker
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends nmap net-tools && \
-    apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+# Copy build scripts
+COPY virtualization/Docker/ virtualization/Docker/
+RUN virtualization/Docker/setup_docker_prereqs
 
-COPY script/build_python_openzwave script/build_python_openzwave
-RUN apt-get update && \
-   apt-get install -y cython3 libudev-dev && \
-   apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
-   pip3 install "cython<0.23" && \
-   script/build_python_openzwave
-
+# Install hass component dependencies
 COPY requirements_all.txt requirements_all.txt
-RUN pip3 install --no-cache-dir -r requirements_all.txt
+RUN pip3 install --no-cache-dir -r requirements_all.txt && \
+    pip3 install --no-cache-dir mysqlclient psycopg2 uvloop
 
 # Copy source
 COPY . .

@@ -1,24 +1,32 @@
 """
-homeassistant.components.sensor.torque
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Get data from the Torque OBD application.
+Support for the Torque OBD application.
 
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/sensor.torque/
 """
-
+import logging
 import re
-from homeassistant.const import HTTP_OK
+
+import voluptuous as vol
+
+from homeassistant.core import callback
+from homeassistant.components.http import HomeAssistantView
+from homeassistant.components.sensor import PLATFORM_SCHEMA
+from homeassistant.const import (CONF_EMAIL, CONF_NAME)
 from homeassistant.helpers.entity import Entity
+import homeassistant.helpers.config_validation as cv
 
-
-DOMAIN = 'torque'
-DEPENDENCIES = ['http']
-SENSOR_EMAIL_FIELD = 'eml'
-DEFAULT_NAME = 'vehicle'
-ENTITY_NAME_FORMAT = '{0} {1}'
+_LOGGER = logging.getLogger(__name__)
 
 API_PATH = '/api/torque'
+
+DEFAULT_NAME = 'vehicle'
+DEPENDENCIES = ['http']
+DOMAIN = 'torque'
+
+ENTITY_NAME_FORMAT = '{0} {1}'
+
+SENSOR_EMAIL_FIELD = 'eml'
 SENSOR_NAME_KEY = r'userFullName(\w+)'
 SENSOR_UNIT_KEY = r'userUnit(\w+)'
 SENSOR_VALUE_KEY = r'k(\w+)'
@@ -27,31 +35,54 @@ NAME_KEY = re.compile(SENSOR_NAME_KEY)
 UNIT_KEY = re.compile(SENSOR_UNIT_KEY)
 VALUE_KEY = re.compile(SENSOR_VALUE_KEY)
 
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
+    vol.Required(CONF_EMAIL): cv.string,
+    vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
+})
+
 
 def decode(value):
-    """ Double-decode required. """
+    """Double-decode required."""
     return value.encode('raw_unicode_escape').decode('utf-8')
 
 
 def convert_pid(value):
-    """ Convert pid from hex string to integer. """
+    """Convert pid from hex string to integer."""
     return int(value, 16)
 
 
 # pylint: disable=unused-argument
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """ Set up Torque platform. """
-
-    vehicle = config.get('name', DEFAULT_NAME)
-    email = config.get('email', None)
+    """Setup Torque platform."""
+    vehicle = config.get(CONF_NAME)
+    email = config.get(CONF_EMAIL)
     sensors = {}
 
-    def _receive_data(handler, path_match, data):
-        """ Received data from Torque. """
-        handler.send_response(HTTP_OK)
-        handler.end_headers()
+    hass.http.register_view(TorqueReceiveDataView(
+        email, vehicle, sensors, add_devices))
+    return True
 
-        if email is not None and email != data[SENSOR_EMAIL_FIELD]:
+
+class TorqueReceiveDataView(HomeAssistantView):
+    """Handle data from Torque requests."""
+
+    url = API_PATH
+    name = 'api:torque'
+
+    def __init__(self, email, vehicle, sensors, add_devices):
+        """Initialize a Torque view."""
+        self.email = email
+        self.vehicle = vehicle
+        self.sensors = sensors
+        self.add_devices = add_devices
+
+    @callback
+    def get(self, request):
+        """Handle Torque data request."""
+        hass = request.app['hass']
+        data = request.GET
+
+        if self.email is not None and self.email != data[SENSOR_EMAIL_FIELD]:
             return
 
         names = {}
@@ -69,49 +100,50 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
                 units[pid] = decode(data[key])
             elif is_value:
                 pid = convert_pid(is_value.group(1))
-                if pid in sensors:
-                    sensors[pid].on_update(data[key])
+                if pid in self.sensors:
+                    self.sensors[pid].async_on_update(data[key])
 
         for pid in names:
-            if pid not in sensors:
-                sensors[pid] = TorqueSensor(
-                    ENTITY_NAME_FORMAT.format(vehicle, names[pid]),
+            if pid not in self.sensors:
+                self.sensors[pid] = TorqueSensor(
+                    ENTITY_NAME_FORMAT.format(self.vehicle, names[pid]),
                     units.get(pid, None))
-                add_devices([sensors[pid]])
+                hass.async_add_job(self.add_devices, [self.sensors[pid]])
 
-    hass.http.register_path('GET', API_PATH, _receive_data)
-    return True
+        return None
 
 
 class TorqueSensor(Entity):
-    """ Represents a Torque sensor. """
+    """Representation of a Torque sensor."""
 
     def __init__(self, name, unit):
+        """Initialize the sensor."""
         self._name = name
         self._unit = unit
         self._state = None
 
     @property
     def name(self):
-        """ Returns the name of the sensor. """
+        """Return the name of the sensor."""
         return self._name
 
     @property
     def unit_of_measurement(self):
-        """ Returns the unit of measurement. """
+        """Return the unit of measurement."""
         return self._unit
 
     @property
     def state(self):
-        """ State of the sensor. """
+        """Return the state of the sensor."""
         return self._state
 
     @property
     def icon(self):
-        """ Sensor default icon. """
+        """Return the default icon of the sensor."""
         return 'mdi:car'
 
-    def on_update(self, value):
-        """ Receive an update. """
+    @callback
+    def async_on_update(self, value):
+        """Receive an update."""
         self._state = value
-        self.update_ha_state()
+        self.hass.async_add_job(self.async_update_ha_state())

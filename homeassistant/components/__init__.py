@@ -1,33 +1,32 @@
 """
-homeassistant.components
-~~~~~~~~~~~~~~~~~~~~~~~~
 This package contains components that can be plugged into Home Assistant.
 
 Component design guidelines:
-
-Each component defines a constant DOMAIN that is equal to its filename.
-
-Each component that tracks states should create state entity names in the
-format "<DOMAIN>.<OBJECT_ID>".
-
-Each component should publish services only under its own domain.
+- Each component defines a constant DOMAIN that is equal to its filename.
+- Each component that tracks states should create state entity names in the
+  format "<DOMAIN>.<OBJECT_ID>".
+- Each component should publish services only under its own domain.
 """
+import asyncio
 import itertools as it
 import logging
 
 import homeassistant.core as ha
-import homeassistant.util as util
-from homeassistant.helpers import extract_entity_ids
+from homeassistant.helpers.service import extract_entity_ids
 from homeassistant.loader import get_component
 from homeassistant.const import (
     ATTR_ENTITY_ID, SERVICE_TURN_ON, SERVICE_TURN_OFF, SERVICE_TOGGLE)
 
 _LOGGER = logging.getLogger(__name__)
 
+SERVICE_RELOAD_CORE_CONFIG = 'reload_core_config'
+
 
 def is_on(hass, entity_id=None):
-    """ Loads up the module to call the is_on method.
-    If there is no entity id given we will check all. """
+    """Load up the module to call the is_on method.
+
+    If there is no entity id given we will check all.
+    """
     if entity_id:
         group = get_component('group')
 
@@ -36,7 +35,7 @@ def is_on(hass, entity_id=None):
         entity_ids = hass.states.entity_ids()
 
     for entity_id in entity_ids:
-        domain = util.split_entity_id(entity_id)[0]
+        domain = ha.split_entity_id(entity_id)[0]
 
         module = get_component(domain)
 
@@ -53,7 +52,7 @@ def is_on(hass, entity_id=None):
 
 
 def turn_on(hass, entity_id=None, **service_data):
-    """ Turns specified entity on if possible. """
+    """Turn specified entity on if possible."""
     if entity_id is not None:
         service_data[ATTR_ENTITY_ID] = entity_id
 
@@ -61,7 +60,7 @@ def turn_on(hass, entity_id=None, **service_data):
 
 
 def turn_off(hass, entity_id=None, **service_data):
-    """ Turns specified entity off. """
+    """Turn specified entity off."""
     if entity_id is not None:
         service_data[ATTR_ENTITY_ID] = entity_id
 
@@ -69,18 +68,24 @@ def turn_off(hass, entity_id=None, **service_data):
 
 
 def toggle(hass, entity_id=None, **service_data):
-    """ Toggles specified entity. """
+    """Toggle specified entity."""
     if entity_id is not None:
         service_data[ATTR_ENTITY_ID] = entity_id
 
     hass.services.call(ha.DOMAIN, SERVICE_TOGGLE, service_data)
 
 
-def setup(hass, config):
-    """ Setup general services related to homeassistant. """
+def reload_core_config(hass):
+    """Reload the core config."""
+    hass.services.call(ha.DOMAIN, SERVICE_RELOAD_CORE_CONFIG)
 
+
+@asyncio.coroutine
+def async_setup(hass, config):
+    """Setup general services related to Home Assistant."""
+    @asyncio.coroutine
     def handle_turn_service(service):
-        """ Method to handle calls to homeassistant.turn_on/off. """
+        """Method to handle calls to homeassistant.turn_on/off."""
         entity_ids = extract_entity_ids(hass, service)
 
         # Generic turn on/off method requires entity id
@@ -92,7 +97,9 @@ def setup(hass, config):
 
         # Group entity_ids by domain. groupby requires sorted data.
         by_domain = it.groupby(sorted(entity_ids),
-                               lambda item: util.split_entity_id(item)[0])
+                               lambda item: ha.split_entity_id(item)[0])
+
+        tasks = []
 
         for domain, ent_ids in by_domain:
             # We want to block for all calls and only return when all calls
@@ -109,10 +116,34 @@ def setup(hass, config):
             # ent_ids is a generator, convert it to a list.
             data[ATTR_ENTITY_ID] = list(ent_ids)
 
-            hass.services.call(domain, service.service, data, blocking)
+            tasks.append(hass.services.async_call(
+                domain, service.service, data, blocking))
 
-    hass.services.register(ha.DOMAIN, SERVICE_TURN_OFF, handle_turn_service)
-    hass.services.register(ha.DOMAIN, SERVICE_TURN_ON, handle_turn_service)
-    hass.services.register(ha.DOMAIN, SERVICE_TOGGLE, handle_turn_service)
+        yield from asyncio.wait(tasks, loop=hass.loop)
+
+    hass.services.async_register(
+        ha.DOMAIN, SERVICE_TURN_OFF, handle_turn_service)
+    hass.services.async_register(
+        ha.DOMAIN, SERVICE_TURN_ON, handle_turn_service)
+    hass.services.async_register(
+        ha.DOMAIN, SERVICE_TOGGLE, handle_turn_service)
+
+    @asyncio.coroutine
+    def handle_reload_config(call):
+        """Service handler for reloading core config."""
+        from homeassistant.exceptions import HomeAssistantError
+        from homeassistant import config as conf_util
+
+        try:
+            conf = yield from conf_util.async_hass_config_yaml(hass)
+        except HomeAssistantError as err:
+            _LOGGER.error(err)
+            return
+
+        yield from conf_util.async_process_ha_core_config(
+            hass, conf.get(ha.DOMAIN) or {})
+
+    hass.services.async_register(
+        ha.DOMAIN, SERVICE_RELOAD_CORE_CONFIG, handle_reload_config)
 
     return True

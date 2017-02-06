@@ -1,26 +1,26 @@
 """
-homeassistant.components.device_tracker.aruba
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Device tracker platform that supports scanning a Aruba Access Point for device
-presence.
+Support for Aruba Access Points.
 
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/device_tracker.aruba/
 """
 import logging
-from datetime import timedelta
 import re
 import threading
-import telnetlib
+from datetime import timedelta
 
-from homeassistant.const import CONF_HOST, CONF_USERNAME, CONF_PASSWORD
-from homeassistant.helpers import validate_config
+import voluptuous as vol
+
+import homeassistant.helpers.config_validation as cv
+from homeassistant.components.device_tracker import (
+    DOMAIN, PLATFORM_SCHEMA, DeviceScanner)
+from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.util import Throttle
-from homeassistant.components.device_tracker import DOMAIN
 
 # Return cached results if last scan was less then this time ago
 MIN_TIME_BETWEEN_SCANS = timedelta(seconds=10)
 
+REQUIREMENTS = ['pexpect==4.0.1']
 _LOGGER = logging.getLogger(__name__)
 
 _DEVICES_REGEX = re.compile(
@@ -28,23 +28,26 @@ _DEVICES_REGEX = re.compile(
     r'(?P<ip>([0-9]{1,3}[\.]){3}[0-9]{1,3})\s+' +
     r'(?P<mac>(([0-9a-f]{2}[:-]){5}([0-9a-f]{2})))\s+')
 
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
+    vol.Required(CONF_HOST): cv.string,
+    vol.Required(CONF_PASSWORD): cv.string,
+    vol.Required(CONF_USERNAME): cv.string
+})
+
 
 # pylint: disable=unused-argument
 def get_scanner(hass, config):
-    """ Validates config and returns a Aruba scanner. """
-    if not validate_config(config,
-                           {DOMAIN: [CONF_HOST, CONF_USERNAME, CONF_PASSWORD]},
-                           _LOGGER):
-        return None
-
+    """Validate the configuration and return a Aruba scanner."""
     scanner = ArubaDeviceScanner(config[DOMAIN])
 
     return scanner if scanner.success_init else None
 
 
-class ArubaDeviceScanner(object):
-    """ This class queries a Aruba Acces Point for connected devices. """
+class ArubaDeviceScanner(DeviceScanner):
+    """This class queries a Aruba Access Point for connected devices."""
+
     def __init__(self, config):
+        """Initialize the scanner."""
         self.host = config[CONF_HOST]
         self.username = config[CONF_USERNAME]
         self.password = config[CONF_PASSWORD]
@@ -53,20 +56,17 @@ class ArubaDeviceScanner(object):
 
         self.last_results = {}
 
-        # Test the router is accessible
+        # Test the router is accessible.
         data = self.get_aruba_data()
         self.success_init = data is not None
 
     def scan_devices(self):
-        """
-        Scans for new devices and return a list containing found device IDs.
-        """
-
+        """Scan for new devices and return a list with found device IDs."""
         self._update_info()
         return [client['mac'] for client in self.last_results]
 
     def get_device_name(self, device):
-        """ Returns the name of the given device or None if we don't know. """
+        """Return the name of the given device or None if we don't know."""
         if not self.last_results:
             return None
         for client in self.last_results:
@@ -76,9 +76,9 @@ class ArubaDeviceScanner(object):
 
     @Throttle(MIN_TIME_BETWEEN_SCANS)
     def _update_info(self):
-        """
-        Ensures the information from the Aruba Access Point is up to date.
-        Returns boolean if scanning successful.
+        """Ensure the information from the Aruba Access Point is up to date.
+
+        Return boolean if scanning successful.
         """
         if not self.success_init:
             return False
@@ -92,24 +92,39 @@ class ArubaDeviceScanner(object):
             return True
 
     def get_aruba_data(self):
-        """ Retrieve data from Aruba Access Point and return parsed result. """
-        try:
-            telnet = telnetlib.Telnet(self.host)
-            telnet.read_until(b'User: ')
-            telnet.write((self.username + '\r\n').encode('ascii'))
-            telnet.read_until(b'Password: ')
-            telnet.write((self.password + '\r\n').encode('ascii'))
-            telnet.read_until(b'#')
-            telnet.write(('show clients\r\n').encode('ascii'))
-            devices_result = telnet.read_until(b'#').split(b'\r\n')
-            telnet.write('exit\r\n'.encode('ascii'))
-        except EOFError:
-            _LOGGER.exception("Unexpected response from router")
+        """Retrieve data from Aruba Access Point and return parsed result."""
+        import pexpect
+        connect = 'ssh {}@{}'
+        ssh = pexpect.spawn(connect.format(self.username, self.host))
+        query = ssh.expect(['password:', pexpect.TIMEOUT, pexpect.EOF,
+                            'continue connecting (yes/no)?',
+                            'Host key verification failed.',
+                            'Connection refused',
+                            'Connection timed out'], timeout=120)
+        if query == 1:
+            _LOGGER.error('Timeout')
             return
-        except ConnectionRefusedError:
-            _LOGGER.exception("Connection refused by router," +
-                              " is telnet enabled?")
+        elif query == 2:
+            _LOGGER.error('Unexpected response from router')
             return
+        elif query == 3:
+            ssh.sendline('yes')
+            ssh.expect('password:')
+        elif query == 4:
+            _LOGGER.error('Host key Changed')
+            return
+        elif query == 5:
+            _LOGGER.error('Connection refused by server')
+            return
+        elif query == 6:
+            _LOGGER.error('Connection timed out')
+            return
+        ssh.sendline(self.password)
+        ssh.expect('#')
+        ssh.sendline('show clients')
+        ssh.expect('#')
+        devices_result = ssh.before.split(b'\r\n')
+        ssh.sendline('exit')
 
         devices = {}
         for device in devices_result:
@@ -119,5 +134,5 @@ class ArubaDeviceScanner(object):
                     'ip': match.group('ip'),
                     'mac': match.group('mac').upper(),
                     'name': match.group('name')
-                    }
+                }
         return devices

@@ -1,58 +1,57 @@
 """
-homeassistant.components.device_tracker.thomson
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Device tracker platform that supports scanning a THOMSON router for device
-presence.
+Support for THOMSON routers.
 
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/device_tracker.thomson/
 """
 import logging
-from datetime import timedelta
 import re
-import threading
 import telnetlib
+import threading
+from datetime import timedelta
 
-from homeassistant.const import CONF_HOST, CONF_USERNAME, CONF_PASSWORD
-from homeassistant.helpers import validate_config
+import voluptuous as vol
+
+import homeassistant.helpers.config_validation as cv
+from homeassistant.components.device_tracker import (
+    DOMAIN, PLATFORM_SCHEMA, DeviceScanner)
+from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.util import Throttle
-from homeassistant.components.device_tracker import DOMAIN
 
-# Return cached results if last scan was less then this time ago
+# Return cached results if last scan was less then this time ago.
 MIN_TIME_BETWEEN_SCANS = timedelta(seconds=10)
 
 _LOGGER = logging.getLogger(__name__)
 
 _DEVICES_REGEX = re.compile(
-    r'(?P<mac>(([0-9a-f]{2}[:-]){5}([0-9a-f]{2})))\s' +
-    r'(?P<ip>([0-9]{1,3}[\.]){3}[0-9]{1,3})\s+' +
-    r'(?P<status>([^\s]+))\s+' +
-    r'(?P<type>([^\s]+))\s+' +
-    r'(?P<intf>([^\s]+))\s+' +
-    r'(?P<hwintf>([^\s]+))\s+' +
+    r'(?P<mac>(([0-9a-f]{2}[:-]){5}([0-9a-f]{2})))\s'
+    r'(?P<ip>([0-9]{1,3}[\.]){3}[0-9]{1,3})\s+'
+    r'(?P<status>([^\s]+))\s+'
+    r'(?P<type>([^\s]+))\s+'
+    r'(?P<intf>([^\s]+))\s+'
+    r'(?P<hwintf>([^\s]+))\s+'
     r'(?P<host>([^\s]+))')
+
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
+    vol.Required(CONF_HOST): cv.string,
+    vol.Required(CONF_PASSWORD): cv.string,
+    vol.Required(CONF_USERNAME): cv.string
+})
 
 
 # pylint: disable=unused-argument
 def get_scanner(hass, config):
-    """ Validates config and returns a THOMSON scanner. """
-    if not validate_config(config,
-                           {DOMAIN: [CONF_HOST, CONF_USERNAME, CONF_PASSWORD]},
-                           _LOGGER):
-        return None
-
+    """Validate the configuration and return a THOMSON scanner."""
     scanner = ThomsonDeviceScanner(config[DOMAIN])
 
     return scanner if scanner.success_init else None
 
 
-class ThomsonDeviceScanner(object):
-    """
-    This class queries a router running THOMSON firmware
-    for connected devices. Adapted from ASUSWRT scanner.
-    """
+class ThomsonDeviceScanner(DeviceScanner):
+    """This class queries a router running THOMSON firmware."""
 
     def __init__(self, config):
+        """Initialize the scanner."""
         self.host = config[CONF_HOST]
         self.username = config[CONF_USERNAME]
         self.password = config[CONF_PASSWORD]
@@ -61,20 +60,17 @@ class ThomsonDeviceScanner(object):
 
         self.last_results = {}
 
-        # Test the router is accessible
+        # Test the router is accessible.
         data = self.get_thomson_data()
         self.success_init = data is not None
 
     def scan_devices(self):
-        """ Scans for new devices and return a
-            list containing found device ids. """
-
+        """Scan for new devices and return a list with found device IDs."""
         self._update_info()
         return [client['mac'] for client in self.last_results]
 
     def get_device_name(self, device):
-        """ Returns the name of the given device
-            or None if we don't know. """
+        """Return the name of the given device or None if we don't know."""
         if not self.last_results:
             return None
         for client in self.last_results:
@@ -84,27 +80,27 @@ class ThomsonDeviceScanner(object):
 
     @Throttle(MIN_TIME_BETWEEN_SCANS)
     def _update_info(self):
-        """
-        Ensures the information from the THOMSON router is up to date.
-        Returns boolean if scanning successful.
+        """Ensure the information from the THOMSON router is up to date.
+
+        Return boolean if scanning successful.
         """
         if not self.success_init:
             return False
 
         with self.lock:
-            _LOGGER.info("Checking ARP")
+            _LOGGER.info('Checking ARP')
             data = self.get_thomson_data()
             if not data:
                 return False
 
-            # flag C stands for CONNECTED
+            # Flag C stands for CONNECTED
             active_clients = [client for client in data.values() if
                               client['status'].find('C') != -1]
             self.last_results = active_clients
             return True
 
     def get_thomson_data(self):
-        """ Retrieve data from THOMSON and return parsed result. """
+        """Retrieve data from THOMSON and return parsed result."""
         try:
             telnet = telnetlib.Telnet(self.host)
             telnet.read_until(b'Username : ')
@@ -116,11 +112,11 @@ class ThomsonDeviceScanner(object):
             devices_result = telnet.read_until(b'=>').split(b'\r\n')
             telnet.write('exit\r\n'.encode('ascii'))
         except EOFError:
-            _LOGGER.exception("Unexpected response from router")
+            _LOGGER.exception('Unexpected response from router')
             return
         except ConnectionRefusedError:
-            _LOGGER.exception("Connection refused by router," +
-                              " is telnet enabled?")
+            _LOGGER.exception('Connection refused by router,'
+                              ' is telnet enabled?')
             return
 
         devices = {}

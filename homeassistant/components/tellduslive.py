@@ -1,209 +1,224 @@
 """
-homeassistant.components.tellduslive
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Support for Telldus Live.
 
-Tellduslive Component
-
-This component adds support for the Telldus Live service.
-Telldus Live is the online service used with Tellstick Net devices.
-
-For more details about this platform, please refer to the documentation at
-https://home-assistant.io/components/sensor.tellduslive/
-
-Developer access to the Telldus Live service is neccessary
-API keys can be aquired from https://api.telldus.com/keys/index
-
-Tellstick Net devices can be auto discovered using the method described in:
-https://developer.telldus.com/doxygen/html/TellStickNet.html
-
-It might be possible to communicate with the Tellstick Net device
-directly, bypassing the Tellstick Live service.
-This however is poorly documented and yet not fully supported (?) according to
-http://developer.telldus.se/ticket/114 and
-https://developer.telldus.com/doxygen/html/TellStickNet.html
-
-API requests to certain methods, as described in
-https://api.telldus.com/explore/sensor/info
-are limited to one request every 10 minutes
-
+For more details about this component, please refer to the documentation at
+https://home-assistant.io/components/tellduslive/
 """
-
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
 
-from homeassistant.loader import get_component
-from homeassistant import bootstrap
-from homeassistant.util import Throttle
-from homeassistant.helpers import validate_config
-from homeassistant.const import (
-    EVENT_PLATFORM_DISCOVERED, ATTR_SERVICE, ATTR_DISCOVERED)
+from homeassistant.const import ATTR_BATTERY_LEVEL, DEVICE_DEFAULT_NAME
+from homeassistant.helpers import discovery
+import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.entity import Entity
+from homeassistant.helpers.event import track_point_in_utc_time
+from homeassistant.util.dt import utcnow
+import voluptuous as vol
 
+DOMAIN = 'tellduslive'
 
-DOMAIN = "tellduslive"
-DISCOVER_SWITCHES = "tellduslive.switches"
-DISCOVER_SENSORS = "tellduslive.sensors"
+REQUIREMENTS = ['tellduslive==0.3.0']
 
-CONF_PUBLIC_KEY = "public_key"
-CONF_PRIVATE_KEY = "private_key"
-CONF_TOKEN = "token"
-CONF_TOKEN_SECRET = "token_secret"
-
-REQUIREMENTS = ['tellive-py==0.5.2']
 _LOGGER = logging.getLogger(__name__)
 
-NETWORK = None
+CONF_PUBLIC_KEY = 'public_key'
+CONF_PRIVATE_KEY = 'private_key'
+CONF_TOKEN = 'token'
+CONF_TOKEN_SECRET = 'token_secret'
+CONF_UPDATE_INTERVAL = 'update_interval'
 
-# Return cached results if last scan was less then this time ago
-MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=600)
+MIN_UPDATE_INTERVAL = timedelta(seconds=5)
+DEFAULT_UPDATE_INTERVAL = timedelta(minutes=1)
+
+CONFIG_SCHEMA = vol.Schema({
+    DOMAIN: vol.Schema({
+        vol.Required(CONF_PUBLIC_KEY): cv.string,
+        vol.Required(CONF_PRIVATE_KEY): cv.string,
+        vol.Required(CONF_TOKEN): cv.string,
+        vol.Required(CONF_TOKEN_SECRET): cv.string,
+        vol.Optional(CONF_UPDATE_INTERVAL, default=DEFAULT_UPDATE_INTERVAL): (
+            vol.All(cv.time_period, vol.Clamp(min=MIN_UPDATE_INTERVAL)))
+    }),
+}, extra=vol.ALLOW_EXTRA)
 
 
-class TelldusLiveData(object):
-    """ Gets the latest data and update the states. """
+ATTR_LAST_UPDATED = 'time_last_updated'
+
+
+def setup(hass, config):
+    """Setup the Telldus Live component."""
+    client = TelldusLiveClient(hass, config)
+
+    if not client.validate_session():
+        _LOGGER.error(
+            'Authentication Error: '
+            'Please make sure you have configured your keys '
+            'that can be aquired from https://api.telldus.com/keys/index')
+        return False
+
+    hass.data[DOMAIN] = client
+    client.update(utcnow())
+
+    return True
+
+
+class TelldusLiveClient(object):
+    """Get the latest data and update the states."""
 
     def __init__(self, hass, config):
+        """Initialize the Tellus data object."""
+        from tellduslive import Client
 
         public_key = config[DOMAIN].get(CONF_PUBLIC_KEY)
         private_key = config[DOMAIN].get(CONF_PRIVATE_KEY)
         token = config[DOMAIN].get(CONF_TOKEN)
         token_secret = config[DOMAIN].get(CONF_TOKEN_SECRET)
 
-        from tellive.client import LiveClient
-        from tellive.live import TelldusLive
+        self.entities = []
 
-        self._sensors = []
-        self._switches = []
+        self._hass = hass
+        self._config = config
 
-        self._client = LiveClient(public_key=public_key,
-                                  private_key=private_key,
-                                  access_token=token,
-                                  access_secret=token_secret)
-        self._api = TelldusLive(self._client)
+        self._interval = config[DOMAIN].get(CONF_UPDATE_INTERVAL)
+        _LOGGER.debug('Update interval %s', self._interval)
 
-    def update(self, hass, config):
-        """ Send discovery event if component not yet discovered """
-        self._update_sensors()
-        self._update_switches()
-        for component_name, found_devices, discovery_type in \
-            (('sensor', self._sensors, DISCOVER_SENSORS),
-             ('switch', self._switches, DISCOVER_SWITCHES)):
-            if len(found_devices):
-                component = get_component(component_name)
-                bootstrap.setup_component(hass, component.DOMAIN, config)
-                hass.bus.fire(EVENT_PLATFORM_DISCOVERED,
-                              {ATTR_SERVICE: discovery_type,
-                               ATTR_DISCOVERED: {}})
-
-    def _request(self, what, **params):
-        """ Sends a request to the tellstick live API """
-
-        from tellive.live import const
-
-        supported_methods = const.TELLSTICK_TURNON \
-            | const.TELLSTICK_TURNOFF \
-            | const.TELLSTICK_TOGGLE
-
-        default_params = {'supportedMethods': supported_methods,
-                          "includeValues": 1,
-                          "includeScale": 1}
-
-        params.update(default_params)
-
-        # room for improvement: the telllive library doesn't seem to
-        # re-use sessions, instead it opens a new session for each request
-        # this needs to be fixed
-        response = self._client.request(what, params)
-        return response
-
-    def check_request(self, what, **params):
-        """ Make request, check result if successful """
-        response = self._request(what, **params)
-        return response['status'] == "success"
+        self._client = Client(public_key,
+                              private_key,
+                              token,
+                              token_secret)
 
     def validate_session(self):
-        """ Make a dummy request to see if the session is valid """
+        """Make a request to see if the session is valid."""
+        response = self._client.request_user()
+        return response and 'email' in response
+
+    def update(self, now):
+        """Periodically poll the servers for current state."""
+        _LOGGER.debug('Updating')
         try:
-            response = self._request("user/profile")
-            return 'email' in response
-        except RuntimeError:
-            return False
+            self._sync()
+        finally:
+            track_point_in_utc_time(self._hass,
+                                    self.update,
+                                    now + self._interval)
 
-    @Throttle(MIN_TIME_BETWEEN_UPDATES)
-    def _update_sensors(self):
-        """ Get the latest sensor data from Telldus Live """
-        _LOGGER.info("Updating sensors from Telldus Live")
-        self._sensors = self._request("sensors/list")["sensor"]
+    def _sync(self):
+        """Update local list of devices."""
+        self._client.update()
 
-    def _update_switches(self):
-        """ Get the configured switches from Telldus Live"""
-        _LOGGER.info("Updating switches from Telldus Live")
-        self._switches = self._request("devices/list")["device"]
-        # filter out any group of switches
-        self._switches = [switch for switch in self._switches
-                          if switch["type"] == "device"]
+        def identify_device(device):
+            """Find out what type of HA component to create."""
+            from tellduslive import (DIM, UP, TURNON)
+            if device.methods & DIM:
+                return 'light'
+            elif device.methods & UP:
+                return 'cover'
+            elif device.methods & TURNON:
+                return 'switch'
+            else:
+                _LOGGER.warning('Unidentified device type (methods: %d)',
+                                device.methods)
+                return 'switch'
 
-    def get_sensors(self):
-        """ Get the configured sensors """
-        self._update_sensors()
-        return self._sensors
+        def discover(device_id, component):
+            """Discover the component."""
+            discovery.load_platform(self._hass,
+                                    component,
+                                    DOMAIN,
+                                    [device_id],
+                                    self._config)
 
-    def get_switches(self):
-        """ Get the configured switches """
-        self._update_switches()
-        return self._switches
+        known_ids = set([entity.device_id for entity in self.entities])
+        for device in self._client.devices:
+            if device.device_id in known_ids:
+                continue
+            if device.is_sensor:
+                for item in device.items:
+                    discover((device.device_id, item.name, item.scale),
+                             'sensor')
+            else:
+                discover(device.device_id,
+                         identify_device(device))
 
-    def get_sensor_value(self, sensor_id, sensor_name):
-        """ Get the latest (possibly cached) sensor value """
-        self._update_sensors()
-        for component in self._sensors:
-            if component["id"] == sensor_id:
-                for sensor in component["data"]:
-                    if sensor["name"] == sensor_name:
-                        return (sensor["value"],
-                                component["battery"],
-                                component["lastUpdated"])
+        for entity in self.entities:
+            entity.changed()
 
-    def get_switch_state(self, switch_id):
-        """ returns state of switch. """
-        _LOGGER.info("Updating switch state from Telldus Live")
-        response = self._request("device/info", id=switch_id)["state"]
-        return int(response)
+    def device(self, device_id):
+        """Return device representation."""
+        return self._client.device(device_id)
 
-    def turn_switch_on(self, switch_id):
-        """ turn switch off """
-        return self.check_request("device/turnOn", id=switch_id)
-
-    def turn_switch_off(self, switch_id):
-        """ turn switch on """
-        return self.check_request("device/turnOff", id=switch_id)
+    def is_available(self, device_id):
+        """Return device availability."""
+        return device_id in self._client.device_ids
 
 
-def setup(hass, config):
-    """ Setup the tellduslive component """
+class TelldusLiveEntity(Entity):
+    """Base class for all Telldus Live entities."""
 
-    # fixme: aquire app key and provide authentication
-    # using username + password
-    if not validate_config(config,
-                           {DOMAIN: [CONF_PUBLIC_KEY,
-                                     CONF_PRIVATE_KEY,
-                                     CONF_TOKEN,
-                                     CONF_TOKEN_SECRET]},
-                           _LOGGER):
-        _LOGGER.error(
-            "Configuration Error: "
-            "Please make sure you have configured your keys "
-            "that can be aquired from https://api.telldus.com/keys/index")
+    def __init__(self, hass, device_id):
+        """Initialize the entity."""
+        self._id = device_id
+        self._client = hass.data[DOMAIN]
+        self._client.entities.append(self)
+        _LOGGER.debug('Created device %s', self)
+
+    def changed(self):
+        """A property of the device might have changed."""
+        self.schedule_update_ha_state()
+
+    @property
+    def device_id(self):
+        """Return the id of the device."""
+        return self._id
+
+    @property
+    def device(self):
+        """Return the representaion of the device."""
+        return self._client.device(self.device_id)
+
+    @property
+    def _state(self):
+        """Return the state of the device."""
+        return self.device.state
+
+    @property
+    def should_poll(self):
+        """Polling is not needed."""
         return False
 
-    global NETWORK
-    NETWORK = TelldusLiveData(hass, config)
+    @property
+    def assumed_state(self):
+        """Return true if unable to access real state of entity."""
+        return True
 
-    if not NETWORK.validate_session():
-        _LOGGER.error(
-            "Authentication Error: "
-            "Please make sure you have configured your keys "
-            "that can be aquired from https://api.telldus.com/keys/index")
-        return False
+    @property
+    def name(self):
+        """Return name of device."""
+        return self.device.name or DEVICE_DEFAULT_NAME
 
-    NETWORK.update(hass, config)
+    @property
+    def available(self):
+        """Return true if device is not offline."""
+        return self._client.is_available(self.device_id)
 
-    return True
+    @property
+    def device_state_attributes(self):
+        """Return the state attributes."""
+        attrs = {}
+        if self._battery_level:
+            attrs[ATTR_BATTERY_LEVEL] = self._battery_level
+        if self._last_updated:
+            attrs[ATTR_LAST_UPDATED] = self._last_updated
+        return attrs
+
+    @property
+    def _battery_level(self):
+        """Return the battery level of a device."""
+        return round(self.device.battery * 100 / 255) \
+            if self.device.battery else None
+
+    @property
+    def _last_updated(self):
+        """Return the last update of a device."""
+        return str(datetime.fromtimestamp(self.device.lastUpdated)) \
+            if self.device.lastUpdated else None
