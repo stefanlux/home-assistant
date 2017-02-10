@@ -38,7 +38,7 @@ class KNXSwitch(KNXGroupAddress, SwitchDevice):
         This sends a value 0 to the group address of the device
         """
         self.group_write(1)
-        self._state = [1]
+        self._state = 1
         if not self.should_poll:
             self.schedule_update_ha_state()
 
@@ -48,6 +48,6 @@ class KNXSwitch(KNXGroupAddress, SwitchDevice):
         This sends a value 1 to the group address of the device
         """
         self.group_write(0)
-        self._state = [0]
+        self._state = 0
         if not self.should_poll:
             self.schedule_update_ha_state()

@@ -227,7 +227,7 @@ class KNXMultiAddressDevice(Entity):
         from knxip.core import parse_group_address, KNXException
 
         self._config = config
-        self._state = False
+        self._state = 0
         self._data = None
         _LOGGER.debug("Initalizing KNX multi address device")
 
